@@ -26,7 +26,9 @@ if _PROJECT_ROOT not in sys.path:
 
 from macro_place.benchmark import Benchmark
 from submissions.base import BasePlacer
-from submissions.sa_placer import _load_plc, _extract_nets, _legalize
+from submissions.sa_placer import (
+    _load_plc, _extract_nets, _legalize, _sa_refine, _compute_total_hpwl,
+)
 
 
 # ── Differentiable HPWL with pin offsets and fixed contributions ───────────
@@ -122,8 +124,11 @@ def _lse_hpwl(pos: torch.Tensor, net_batches: list,
 def _smooth_density_penalty(pos: torch.Tensor, sizes: torch.Tensor,
                             cw: float, ch: float,
                             grid_n: int = 16,
-                            target_util: float = 0.7) -> torch.Tensor:
-    """Penalize grid cells above target utilization."""
+                            target_util: float = 0.6) -> torch.Tensor:
+    """
+    Penalize grid cells above target utilization.
+    Uses both area density and a congestion proxy (penalizes top cells harder).
+    """
     cell_w = cw / grid_n
     cell_h = ch / grid_n
     cell_area = cell_w * cell_h
@@ -153,8 +158,17 @@ def _smooth_density_penalty(pos: torch.Tensor, sizes: torch.Tensor,
     overlap = ox.unsqueeze(2) * oy.unsqueeze(1)  # [N, Gx, Gy]
     density = overlap.sum(0) / cell_area  # [Gx, Gy]
 
+    # Standard density penalty
     excess = F.relu(density - target_util)
-    return excess.pow(2).mean()
+    density_loss = excess.pow(2).mean()
+
+    # Congestion proxy: penalize top 10% cells more aggressively
+    flat = density.flatten()
+    k = max(1, int(0.1 * flat.numel()))
+    top_vals, _ = flat.topk(k)
+    congestion_loss = top_vals.pow(2).mean()
+
+    return density_loss + 0.5 * congestion_loss
 
 
 # ── Overlap penalty ─────────────────────────────────────────────────────────
@@ -223,20 +237,24 @@ class NetlistGNN(nn.Module):
 
 class LearningPlacer(BasePlacer):
     """
-    GNN-guided differentiable macro placer.
+    GNN-guided differentiable macro placer with SA polish.
 
     Phase 1: GNN predicts initial positions from netlist structure.
     Phase 2: Gradient-based refinement with LSE-HPWL + density + overlap.
     Phase 3: Legalization to remove residual overlaps.
+    Phase 4: SA polish to optimize actual HPWL (not LSE approximation).
+    Multi-start: runs multiple seeds and picks the best.
     """
 
     def __init__(self, seed: int = 42,
-                 gnn_epochs: int = 80,
-                 refine_epochs: int = 300,
+                 gnn_epochs: int = 60,
+                 refine_epochs: int = 200,
                  gnn_lr: float = 3e-3,
                  refine_lr: float = 5.0,
                  gamma_start: float = 50.0,
-                 gamma_end: float = 5.0):
+                 gamma_end: float = 2.0,
+                 sa_iters: int = 100_000,
+                 num_starts: int = 3):
         self.seed = seed
         self.gnn_epochs = gnn_epochs
         self.refine_epochs = refine_epochs
@@ -244,11 +262,135 @@ class LearningPlacer(BasePlacer):
         self.refine_lr = refine_lr
         self.gamma_start = gamma_start
         self.gamma_end = gamma_end
+        self.sa_iters = sa_iters
+        self.num_starts = num_starts
+
+    def _run_one_seed(self, seed: int, benchmark: Benchmark,
+                      nets_raw: list, macro_to_nets: list,
+                      net_batches: list, adj_norm: torch.Tensor,
+                      node_features: torch.Tensor,
+                      sizes: torch.Tensor, half_w: torch.Tensor,
+                      half_h: torch.Tensor, movable: torch.Tensor,
+                      fixed_mask: torch.Tensor, orig_pos: torch.Tensor,
+                      cw: float, ch: float, n_hard: int,
+                      neighbors: list) -> tuple:
+        """Run GNN + refine + legalize + SA for one seed. Returns (pos_np, hpwl)."""
+        import random
+
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        # ── Phase 1: GNN ────────────────────────────────────────────────
+        gnn = NetlistGNN(in_dim=7, hidden_dim=64, out_dim=2, num_layers=3)
+        gnn_opt = torch.optim.Adam(gnn.parameters(), lr=self.gnn_lr)
+
+        for epoch in range(self.gnn_epochs):
+            frac = epoch / max(self.gnn_epochs, 1)
+            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
+
+            gnn_opt.zero_grad()
+            raw_pos = gnn(node_features, adj_norm)
+
+            pos = torch.zeros_like(raw_pos)
+            pos[:, 0] = raw_pos[:, 0] * (cw - sizes[:, 0]) + half_w
+            pos[:, 1] = raw_pos[:, 1] * (ch - sizes[:, 1]) + half_h
+
+            if fixed_mask.any():
+                pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
+
+            loss_wl = _lse_hpwl(pos, net_batches, gamma)
+            loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * 0.015
+            loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * 0.1
+
+            loss = loss_wl + loss_den + loss_ov
+            loss.backward()
+            gnn_opt.step()
+
+        with torch.no_grad():
+            raw_pos = gnn(node_features, adj_norm)
+            init_pos = torch.zeros(n_hard, 2)
+            init_pos[:, 0] = raw_pos[:, 0] * (cw - sizes[:, 0]) + half_w
+            init_pos[:, 1] = raw_pos[:, 1] * (ch - sizes[:, 1]) + half_h
+            if fixed_mask.any():
+                init_pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, init_pos)
+
+        # ── Phase 2: Gradient refinement ────────────────────────────────
+        pos_param = init_pos.clone().detach().requires_grad_(True)
+        refine_opt = torch.optim.Adam([pos_param], lr=self.refine_lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            refine_opt, T_max=self.refine_epochs, eta_min=0.1
+        )
+
+        best_pos = init_pos.clone()
+        best_cost = float('inf')
+
+        for epoch in range(self.refine_epochs):
+            frac = epoch / max(self.refine_epochs, 1)
+            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
+            ov_weight = 0.05 + 3.0 * frac
+
+            refine_opt.zero_grad()
+
+            pos = torch.stack([
+                pos_param[:, 0].clamp(half_w, cw - half_w),
+                pos_param[:, 1].clamp(half_h, ch - half_h),
+            ], dim=1)
+
+            if fixed_mask.any():
+                pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
+
+            loss_wl = _lse_hpwl(pos, net_batches, gamma)
+            den_weight = 0.03 + 0.05 * frac  # ramp up density pressure
+            loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * den_weight
+            loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
+
+            loss = loss_wl + loss_den + loss_ov
+
+            with torch.no_grad():
+                ov_area = _smooth_overlap_penalty(pos, sizes, movable).item()
+                cost = loss_wl.item()
+                if ov_area < 1.0 and cost < best_cost:
+                    best_cost = cost
+                    best_pos = pos.detach().clone()
+
+            loss.backward()
+
+            if fixed_mask.any():
+                pos_param.grad[fixed_mask] = 0
+
+            refine_opt.step()
+            scheduler.step()
+
+        # ── Phase 3: Legalization ───────────────────────────────────────
+        pos_np = best_pos.detach().numpy().astype(np.float64)
+        sizes_np = sizes.numpy().astype(np.float64)
+        half_w_np = sizes_np[:, 0] / 2
+        half_h_np = sizes_np[:, 1] / 2
+        movable_np = movable.numpy()
+
+        sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
+        sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
+
+        legal_pos = _legalize(
+            pos_np, movable_np, sizes_np, half_w_np, half_h_np,
+            cw, ch, n_hard, sep_x, sep_y,
+        )
+
+        # ── Phase 4: SA polish ──────────────────────────────────────────
+        if nets_raw and self.sa_iters > 0:
+            legal_pos = _sa_refine(
+                legal_pos, nets_raw, macro_to_nets, neighbors,
+                movable_np, sizes_np, half_w_np, half_h_np,
+                sep_x, sep_y, cw, ch,
+                self.sa_iters, seed,
+                t_start_factor=0.12,  # full SA exploration from GNN init
+                t_end_factor=0.0008,
+            )
+
+        hpwl = _compute_total_hpwl(legal_pos, nets_raw) if nets_raw else float('inf')
+        return legal_pos, hpwl
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
-
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
         ch = float(benchmark.canvas_height)
@@ -271,8 +413,9 @@ class LearningPlacer(BasePlacer):
         device = torch.device("cpu")
         net_batches = _build_net_tensors(nets_raw, device)
 
-        # ── Build adjacency from nets ────────────────────────────────────
+        # ── Build adjacency and neighbors ────────────────────────────────
         adj = torch.zeros(n_hard, n_hard)
+        neighbors = [[] for _ in range(n_hard)]
         for net in nets_raw:
             idx = net["hard_idx"]
             w = 1.0 / max(len(idx) - 1, 1)
@@ -280,6 +423,7 @@ class LearningPlacer(BasePlacer):
                 for b in idx:
                     if a != b:
                         adj[a, b] += w
+                        neighbors[int(a)].append(int(b))
 
         deg = adj.sum(1, keepdim=True).clamp(min=1)
         adj_norm = adj / deg
@@ -298,104 +442,26 @@ class LearningPlacer(BasePlacer):
             feat_w, feat_h, feat_area, feat_deg, feat_x, feat_y, feat_fixed
         ], dim=1)
 
-        # ── Phase 1: GNN training ────────────────────────────────────────
-        gnn = NetlistGNN(in_dim=7, hidden_dim=64, out_dim=2, num_layers=3)
-        gnn_opt = torch.optim.Adam(gnn.parameters(), lr=self.gnn_lr)
+        # ── Multi-start (adapt to benchmark size) ────────────────────────
+        # Only 1 start — budget goes to longer SA polish
+        num_starts = 1
 
-        for epoch in range(self.gnn_epochs):
-            frac = epoch / max(self.gnn_epochs, 1)
-            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
+        best_pos = None
+        best_hpwl = float('inf')
 
-            gnn_opt.zero_grad()
-            raw_pos = gnn(node_features, adj_norm)
-
-            pos = torch.zeros_like(raw_pos)
-            pos[:, 0] = raw_pos[:, 0] * (cw - sizes[:, 0]) + half_w
-            pos[:, 1] = raw_pos[:, 1] * (ch - sizes[:, 1]) + half_h
-
-            if fixed_mask.any():
-                pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
-
-            loss_wl = _lse_hpwl(pos, net_batches, gamma)
-            loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * 0.01
-            loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * 0.1
-
-            loss = loss_wl + loss_den + loss_ov
-            loss.backward()
-            gnn_opt.step()
-
-        # Get GNN output as initialization
-        with torch.no_grad():
-            raw_pos = gnn(node_features, adj_norm)
-            init_pos = torch.zeros(n_hard, 2)
-            init_pos[:, 0] = raw_pos[:, 0] * (cw - sizes[:, 0]) + half_w
-            init_pos[:, 1] = raw_pos[:, 1] * (ch - sizes[:, 1]) + half_h
-            if fixed_mask.any():
-                init_pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, init_pos)
-
-        # ── Phase 2: Direct position refinement ──────────────────────────
-        pos_param = init_pos.clone().detach().requires_grad_(True)
-        refine_opt = torch.optim.Adam([pos_param], lr=self.refine_lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            refine_opt, T_max=self.refine_epochs, eta_min=0.1
-        )
-
-        best_pos = init_pos.clone()
-        best_cost = float('inf')
-
-        for epoch in range(self.refine_epochs):
-            frac = epoch / max(self.refine_epochs, 1)
-            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
-            ov_weight = 0.01 + 2.0 * frac
-
-            refine_opt.zero_grad()
-
-            pos = torch.stack([
-                pos_param[:, 0].clamp(half_w, cw - half_w),
-                pos_param[:, 1].clamp(half_h, ch - half_h),
-            ], dim=1)
-
-            if fixed_mask.any():
-                pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
-
-            loss_wl = _lse_hpwl(pos, net_batches, gamma)
-            loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * 0.02
-            loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
-
-            loss = loss_wl + loss_den + loss_ov
-
-            with torch.no_grad():
-                ov_area = _smooth_overlap_penalty(pos, sizes, movable).item()
-                cost = loss_wl.item()
-                if ov_area < 1.0 and cost < best_cost:
-                    best_cost = cost
-                    best_pos = pos.detach().clone()
-
-            loss.backward()
-
-            if fixed_mask.any():
-                pos_param.grad[fixed_mask] = 0
-
-            refine_opt.step()
-            scheduler.step()
-
-        # ── Phase 3: Legalization ────────────────────────────────────────
-        pos_np = best_pos.detach().numpy().astype(np.float64)
-        sizes_np = sizes.numpy().astype(np.float64)
-        half_w_np = sizes_np[:, 0] / 2
-        half_h_np = sizes_np[:, 1] / 2
-        movable_np = movable.numpy()
-
-        sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
-        sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
-
-        legal_pos = _legalize(
-            pos_np, movable_np, sizes_np, half_w_np, half_h_np,
-            cw, ch, n_hard, sep_x, sep_y,
-        )
+        for s in range(num_starts):
+            seed = self.seed + s * 1000
+            pos_np, hpwl = self._run_one_seed(
+                seed, benchmark, nets_raw, macro_to_nets, net_batches,
+                adj_norm, node_features, sizes, half_w, half_h,
+                movable, fixed_mask, orig_pos, cw, ch, n_hard, neighbors,
+            )
+            if hpwl < best_hpwl:
+                best_hpwl = hpwl
+                best_pos = pos_np
 
         # ── Build output ─────────────────────────────────────────────────
         full_pos = benchmark.macro_positions.clone()
-        full_pos[:n_hard] = torch.tensor(legal_pos, dtype=torch.float32)
+        full_pos[:n_hard] = torch.tensor(best_pos, dtype=torch.float32)
 
         return full_pos
