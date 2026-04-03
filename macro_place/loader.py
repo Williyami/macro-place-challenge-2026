@@ -27,6 +27,8 @@ def load_benchmark(
         PlacementCost object is needed for cost computation
     """
     # Initialize PlacementCost (parses netlist)
+    # plc_client_os uses '/' to parse path components, so normalize on Windows
+    netlist_file = netlist_file.replace("\\", "/")
     plc = PlacementCost(netlist_file)
 
     # Optionally restore placement from .plc file
