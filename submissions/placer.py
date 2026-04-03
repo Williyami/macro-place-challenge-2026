@@ -32,7 +32,13 @@ class MacroPlacer:
     """
 
     def __init__(self, seed: int = 42):
-        self._inner = SAPlacer(seed=seed, max_iters=100_000, run_fd=False)
+        self._inner = SAPlacer(
+            seed=seed,
+            max_iters=100_000,
+            run_fd=False,
+            snapshot_interval=2_000,
+            trace_interval=500,
+        )
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         return self._inner.place(benchmark)

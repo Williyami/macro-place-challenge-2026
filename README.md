@@ -141,6 +141,9 @@ uv run evaluate submissions/examples/greedy_row_placer.py --vis
 uv run evaluate submissions/examples/greedy_row_placer.py --all --vis
 ```
 
+Each evaluation run also saves media to `artifacts/<PlacerClass>/<benchmark>/`, including
+`initial.png`, `final.png`, and, when the placer records intermediate snapshots, `placement.gif`.
+
 Running on all benchmarks produces a summary like:
 ```
 Benchmark     Proxy        SA   RePlAce     vs SA  vs RePlAce  Overlaps

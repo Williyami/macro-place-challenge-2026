@@ -296,6 +296,10 @@ def _sa_refine(
     ch: float,
     max_iters: int,
     seed: int,
+    snapshot_interval: int = 0,
+    snapshot_callback=None,
+    trace_interval: int = 0,
+    trace_callback=None,
 ) -> np.ndarray:
     """SA loop minimising full net-HPWL while enforcing hard-macro legality."""
     rng = random.Random(seed)
@@ -323,6 +327,16 @@ def _sa_refine(
 
     T_start = max(cw, ch) * 0.15
     T_end   = max(cw, ch) * 0.001
+
+    if trace_callback is not None:
+        trace_callback(
+            {
+                "step": 0,
+                "temperature": T_start,
+                "current_hpwl": current_hpwl,
+                "best_hpwl": best_hpwl,
+            }
+        )
 
     for step in range(max_iters):
         frac = step / max_iters
@@ -430,6 +444,20 @@ def _sa_refine(
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
 
+        if snapshot_callback is not None and snapshot_interval > 0:
+            if (step + 1) % snapshot_interval == 0 or step == max_iters - 1:
+                snapshot_callback(best_pos.copy())
+        if trace_callback is not None and trace_interval > 0:
+            if (step + 1) % trace_interval == 0 or step == max_iters - 1:
+                trace_callback(
+                    {
+                        "step": step + 1,
+                        "temperature": T,
+                        "current_hpwl": current_hpwl,
+                        "best_hpwl": best_hpwl,
+                    }
+                )
+
     return best_pos
 
 
@@ -487,14 +515,29 @@ class SAPlacer(BasePlacer):
     run_fd       : whether to run soft-macro FD at the end
     """
 
-    def __init__(self, seed: int = 42, max_iters: int = 100_000, run_fd: bool = False):
+    def __init__(
+        self,
+        seed: int = 42,
+        max_iters: int = 100_000,
+        run_fd: bool = False,
+        capture_snapshots: bool = True,
+        snapshot_interval: int = 2_000,
+        trace_interval: int = 500,
+    ):
         self.seed = seed
         self.max_iters = max_iters
         self.run_fd = run_fd
+        self.capture_snapshots = capture_snapshots
+        self.snapshot_interval = snapshot_interval
+        self.trace_interval = trace_interval
+        self.debug_snapshots = []
+        self.debug_trace = []
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         random.seed(self.seed)
         np.random.seed(self.seed)
+        self.debug_snapshots = []
+        self.debug_trace = []
 
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
@@ -530,12 +573,28 @@ class SAPlacer(BasePlacer):
         pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
         pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
 
+        def capture_snapshot(pos_hard: np.ndarray):
+            if not self.capture_snapshots:
+                return
+            frame = benchmark.macro_positions.clone()
+            frame[:n_hard] = torch.tensor(pos_hard, dtype=torch.float32)
+            self.debug_snapshots.append(frame)
+
+        def capture_trace(point: dict):
+            self.debug_trace.append(point)
+
+        capture_snapshot(pos)
+
         # Run SA
         if nets:
             pos = _sa_refine(
                 pos, nets, macro_to_nets, neighbors,
                 movable, sizes, half_w, half_h, sep_x, sep_y,
                 cw, ch, self.max_iters, self.seed,
+                snapshot_interval=self.snapshot_interval,
+                snapshot_callback=capture_snapshot if self.capture_snapshots else None,
+                trace_interval=self.trace_interval,
+                trace_callback=capture_trace,
             )
 
         # Build full placement tensor
@@ -546,5 +605,9 @@ class SAPlacer(BasePlacer):
         if self.run_fd and plc is not None and benchmark.num_soft_macros > 0:
             soft_pos = _update_soft_macros(pos, benchmark, plc)
             full_pos[n_hard:] = torch.tensor(soft_pos, dtype=torch.float32)
+
+        if self.capture_snapshots:
+            if not self.debug_snapshots or not torch.equal(self.debug_snapshots[-1], full_pos):
+                self.debug_snapshots.append(full_pos.clone())
 
         return full_pos

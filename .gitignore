@@ -1,5 +1,7 @@
 # Visualizations
 vis/
+artifacts/*
+!artifacts/.gitkeep
 
 # Python
 __pycache__/

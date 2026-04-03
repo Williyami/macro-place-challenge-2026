@@ -18,7 +18,11 @@ from pathlib import Path
 
 from macro_place.loader import load_benchmark, load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
-from macro_place.utils import validate_placement, visualize_placement
+from macro_place.utils import (
+    save_visualization_bundle,
+    validate_placement,
+    visualize_placement,
+)
 
 # ── IBM ICCAD04 benchmark list ──────────────────────────────────────────────
 
@@ -125,6 +129,22 @@ def _load_placer(path: Path):
     )
 
 
+def _get_attr_recursive(obj, attr: str):
+    """Fetch an attribute from a wrapper placer or its inner placer."""
+    current = obj
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if hasattr(current, attr):
+            return getattr(current, attr)
+        current = getattr(current, "_inner", None)
+    return None
+
+
+def _sanitize_name(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name)
+
+
 # ── Single-benchmark evaluation ─────────────────────────────────────────────
 
 
@@ -138,9 +158,22 @@ def evaluate_benchmark(placer, name: str, testcase_root: str, ng45_dir: str = No
         benchmark_dir = f"{testcase_root}/{name}"
         benchmark, plc = load_benchmark_from_dir(benchmark_dir)
 
+    initial_placement = benchmark.macro_positions.clone()
+    if hasattr(placer, "debug_snapshots"):
+        placer.debug_snapshots = []
+    inner = getattr(placer, "_inner", None)
+    if inner is not None and hasattr(inner, "debug_snapshots"):
+        inner.debug_snapshots = []
+
     start = time.time()
     placement = placer.place(benchmark)
     runtime = time.time() - start
+    animation_frames = _get_attr_recursive(placer, "debug_snapshots")
+    if animation_frames is not None:
+        animation_frames = [frame.clone() for frame in animation_frames]
+    cost_history = _get_attr_recursive(placer, "debug_trace")
+    if cost_history is not None:
+        cost_history = [dict(point) for point in cost_history]
 
     is_valid, violations = validate_placement(placement, benchmark)
     costs = compute_proxy_cost(placement, benchmark, plc)
@@ -156,9 +189,12 @@ def evaluate_benchmark(placer, name: str, testcase_root: str, ng45_dir: str = No
         "valid": is_valid,
         "sa_baseline": SA_BASELINES.get(name),
         "replace_baseline": REPLACE_BASELINES.get(name),
+        "initial_placement": initial_placement,
         "placement": placement,
         "benchmark": benchmark,
         "plc": plc,
+        "animation_frames": animation_frames,
+        "cost_history": cost_history,
     }
 
 
@@ -277,6 +313,12 @@ def main():
         action="store_true",
         help="Visualize each placement after evaluation (saves to vis/<benchmark>.png).",
     )
+    parser.add_argument(
+        "--media-dir",
+        type=str,
+        default="artifacts",
+        help="Directory to save generated PNGs/GIFs for each run. Default: artifacts.",
+    )
     args = parser.parse_args()
 
     # ── resolve paths ────────────────────────────────────────────────────
@@ -290,6 +332,7 @@ def main():
     placer_path = Path(args.placer)
     placer = _load_placer(placer_path)
     placer_name = type(placer).__name__
+    media_root = Path(args.media_dir) / _sanitize_name(placer_name)
 
     # ── determine which benchmarks to run ────────────────────────────────
     if args.ng45:
@@ -321,6 +364,17 @@ def main():
             f"proxy={result['proxy_cost']:.4f}  "
             f"(wl={result['wirelength']:.3f} den={result['density']:.3f} cong={result['congestion']:.3f})  "
             f"{status}  [{result['runtime']:.2f}s]"
+        )
+
+        bundle_dir = media_root / name
+        save_visualization_bundle(
+            benchmark=result["benchmark"],
+            initial_placement=result["initial_placement"],
+            final_placement=result["placement"],
+            output_dir=str(bundle_dir),
+            plc=result.get("plc"),
+            animation_frames=result.get("animation_frames"),
+            cost_history=result.get("cost_history"),
         )
 
         if args.vis:

@@ -3,6 +3,7 @@ Utility functions for placement validation and visualization.
 """
 
 import sys
+from pathlib import Path
 
 import torch
 from typing import Tuple, List, Optional
@@ -319,3 +320,209 @@ def visualize_placement(
     else:
         plt.show()
     plt.close(fig)
+
+
+def save_visualization_bundle(
+    benchmark: Benchmark,
+    initial_placement: torch.Tensor,
+    final_placement: torch.Tensor,
+    output_dir: str,
+    plc=None,
+    animation_frames: Optional[List[torch.Tensor]] = None,
+    cost_history: Optional[List[dict]] = None,
+    gif_name: str = "placement.gif",
+):
+    """
+    Save a README-style media bundle for a benchmark run.
+
+    Output layout:
+      output_dir/
+        initial.png
+        final.png
+        frames/frame_0000.png ...
+        placement.gif   (if Pillow is available and multiple frames exist)
+        cost_trace.gif  (if cost history is available)
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    visualize_placement(initial_placement, benchmark, save_path=str(output_path / "initial.png"), plc=plc)
+    visualize_placement(final_placement, benchmark, save_path=str(output_path / "final.png"), plc=plc)
+
+    if animation_frames and len(animation_frames) >= 2:
+        frames_dir = output_path / "frames"
+        frames_dir.mkdir(exist_ok=True)
+
+        frame_paths = []
+        for idx, frame in enumerate(animation_frames):
+            frame_path = frames_dir / f"frame_{idx:04d}.png"
+            visualize_placement(frame, benchmark, save_path=str(frame_path), plc=plc)
+            frame_paths.append(frame_path)
+
+        try:
+            from PIL import Image
+        except ImportError:
+            print(
+                "Warning: Pillow not installed; saved PNG frames but skipped GIF generation.",
+                file=sys.stderr,
+            )
+        else:
+            images = []
+            for frame_path in frame_paths:
+                with Image.open(frame_path) as image:
+                    images.append(image.convert("P", palette=Image.ADAPTIVE))
+
+            if images:
+                images[0].save(
+                    output_path / gif_name,
+                    save_all=True,
+                    append_images=images[1:],
+                    duration=120,
+                    loop=0,
+                    optimize=False,
+                    disposal=2,
+                )
+
+    if cost_history and len(cost_history) >= 2:
+        _save_cost_trace_gif(cost_history, output_path / "cost_trace.gif")
+
+
+def _save_cost_trace_gif(cost_history: List[dict], gif_path: Path):
+    """Save an animated cost trace GIF showing optimization progress over time."""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        print(
+            "Warning: matplotlib or Pillow not installed; skipped cost trace GIF generation.",
+            file=sys.stderr,
+        )
+        return
+
+    steps = [point["step"] for point in cost_history]
+    current = [point["current_hpwl"] for point in cost_history]
+    best = [point["best_hpwl"] for point in cost_history]
+    temps = [point["temperature"] for point in cost_history]
+
+    y_min = min(min(current), min(best))
+    y_max = max(max(current), max(best))
+    if y_min == y_max:
+        y_max = y_min + 1.0
+
+    temp_min = min(temps)
+    temp_max = max(temps)
+    if temp_min == temp_max:
+        temp_max = temp_min + 1.0
+
+    frame_indices = list(range(1, len(cost_history) + 1))
+    if len(frame_indices) > 80:
+        stride = max(1, len(frame_indices) // 80)
+        frame_indices = list(range(1, len(cost_history) + 1, stride))
+        if frame_indices[-1] != len(cost_history):
+            frame_indices.append(len(cost_history))
+
+    images = []
+    full_x_max = max(steps[-1], 1)
+    for end in frame_indices:
+        fig, (ax1, ax2) = plt.subplots(
+            2,
+            1,
+            figsize=(10, 6.5),
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+        fig.patch.set_facecolor("white")
+        ax1.set_facecolor("white")
+        ax2.set_facecolor("white")
+
+        current_steps = steps[:end]
+        current_vals = current[:end]
+        best_vals = best[:end]
+        temp_vals = temps[:end]
+
+        ax1.plot(
+            steps,
+            current,
+            color="lightsteelblue",
+            linewidth=1.5,
+            alpha=0.45,
+        )
+        ax1.plot(
+            steps,
+            best,
+            color="navajowhite",
+            linewidth=1.5,
+            alpha=0.45,
+        )
+        ax2.plot(
+            steps,
+            temps,
+            color="mediumseagreen",
+            linewidth=1.25,
+            alpha=0.35,
+        )
+
+        ax1.plot(
+            current_steps,
+            current_vals,
+            color="steelblue",
+            linewidth=2,
+            marker="o",
+            markersize=3,
+            label="Current HPWL",
+        )
+        ax1.plot(
+            current_steps,
+            best_vals,
+            color="darkorange",
+            linewidth=2,
+            marker="o",
+            markersize=3,
+            label="Best HPWL",
+        )
+        ax2.plot(
+            current_steps,
+            temp_vals,
+            color="seagreen",
+            linewidth=1.75,
+            marker="o",
+            markersize=2.5,
+            label="Temperature",
+        )
+
+        current_step = current_steps[-1]
+        ax1.axvline(current_step, color="gray", linestyle=":", linewidth=1, alpha=0.7)
+        ax2.axvline(current_step, color="gray", linestyle=":", linewidth=1, alpha=0.7)
+
+        ax1.set_xlim(0, full_x_max)
+        ax1.set_ylim(y_min, y_max)
+        ax2.set_ylim(temp_min, temp_max)
+        ax1.set_ylabel("HPWL")
+        ax2.set_ylabel("Temp")
+        ax2.set_xlabel("Iteration")
+        ax1.set_title("Optimization Trace")
+        ax1.grid(True, alpha=0.25)
+        ax2.grid(True, alpha=0.25)
+        ax1.legend(loc="upper right")
+        ax2.legend(loc="upper right")
+        fig.subplots_adjust(left=0.11, right=0.90, top=0.92, bottom=0.10, hspace=0.12)
+
+        fig.canvas.draw()
+        rgba = np.asarray(fig.canvas.buffer_rgba()).copy()
+        image = Image.fromarray(rgba, mode="RGBA").convert("RGB")
+        images.append(image)
+        plt.close(fig)
+
+    if not images:
+        return
+
+    images[0].save(
+        gif_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=120,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
