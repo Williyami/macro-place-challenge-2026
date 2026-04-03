@@ -54,6 +54,17 @@ class LearningPlacer(BasePlacer):
     PLACER_METHOD=learning uv run evaluate submissions/placer.py -b ibm01   # single
     PLACER_METHOD=learning uv run evaluate submissions/placer.py --all      # all 17
 
+## IMPORTANT: Logging results
+After EVERY benchmark run, append results to `notes/eklundnotes.md` with:
+- Date/time
+- Method used (PLACER_METHOD value)
+- Benchmark(s) run
+- Proxy cost, wirelength, density, congestion
+- Time taken
+- Any notable changes made since last run
+
+This is required so we can track progress over time. Do NOT skip this step.
+
 ## Key APIs & data
 - Benchmark.macro_positions: [N, 2] initial positions (x, y centers)
 - Benchmark.macro_sizes: [N, 2] (width, height)
