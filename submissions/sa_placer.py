@@ -357,11 +357,6 @@ def _sa_refine(
                 pos[i, 0] = old_x; pos[i, 1] = old_y
                 continue
 
-            delta = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
-            # Note: pos[i] is already at new position — delta was computed w.r.t. new pos
-            # vs baseline which still has old pos in nets' bboxes.
-            # Actually _delta_hpwl reads pos[i] as old (override to new).
-            # So we need to revert to old to get correct delta.
             pos[i, 0] = old_x; pos[i, 1] = old_y
             delta = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
 
@@ -397,28 +392,22 @@ def _sa_refine(
                 continue
 
             # Delta HPWL for swap: union of nets of both macros
+            # pos is in swapped state after overlap check — compute new HPWL
             affected = list(set(macro_to_nets[i]) | set(macro_to_nets[j]))
-            old_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
+            new_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
+            # Revert to old state, compute old HPWL
             pos[i, 0] = old_x;  pos[i, 1] = old_y
             pos[j, 0] = old_jx; pos[j, 1] = old_jy
-            new_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
-            # Wait - we need old first, then new. Let me fix the order.
-            # At this point pos is reverted. Compute old HPWL (reverted state).
-            # Re-apply and compute new HPWL.
             old_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
-            pos[i, 0] = new_ix; pos[i, 1] = new_iy
-            pos[j, 0] = new_jx; pos[j, 1] = new_jy
-            new_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
             delta = new_hpwl_aff - old_hpwl_aff
 
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
+                pos[i, 0] = new_ix; pos[i, 1] = new_iy
+                pos[j, 0] = new_jx; pos[j, 1] = new_jy
                 current_hpwl += delta
                 if current_hpwl < best_hpwl:
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
-            else:
-                pos[i, 0] = old_x;  pos[i, 1] = old_y
-                pos[j, 0] = old_jx; pos[j, 1] = old_jy
 
         else:
             # ── MOVE TOWARD NEIGHBOR ───────────────────────────────────────
