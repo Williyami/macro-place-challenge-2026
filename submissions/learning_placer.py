@@ -33,74 +33,86 @@ from submissions.sa_placer import _load_plc, _extract_nets, _legalize
 
 def _build_net_tensors(nets: list, device: torch.device):
     """
-    Convert sa_placer net dicts to PyTorch tensors for differentiable HPWL.
+    Convert sa_placer net dicts to padded tensors for vectorized HPWL.
 
-    Returns lists of tensors per net:
-      hard_idx[k]: LongTensor of macro indices
-      hard_ox[k], hard_oy[k]: float offsets
-      fixed_bbox[k]: [fxmin, fxmax, fymin, fymax] (inf/-inf if no fixed pins)
-      weights[k]: float net weight
+    Groups nets by pin count and pads into batched tensors for fast computation.
+    Returns a list of (idx_batch, ox_batch, oy_batch, fixed_x, fixed_y, has_fixed, weights)
+    tuples, one per pin-count group.
     """
-    net_hard_idx = []
-    net_hard_ox = []
-    net_hard_oy = []
-    net_fixed_bbox = []
-    net_w = []
-
+    # Group nets by number of hard pins
+    groups: dict = {}  # pin_count -> (idx_lists, ox_lists, oy_lists, fbboxes, weights)
     for net in nets:
-        net_hard_idx.append(torch.tensor(net["hard_idx"], dtype=torch.long, device=device))
-        net_hard_ox.append(torch.tensor(net["hard_ox"], dtype=torch.float32, device=device))
-        net_hard_oy.append(torch.tensor(net["hard_oy"], dtype=torch.float32, device=device))
-        net_fixed_bbox.append(torch.tensor(
-            [net["fxmin"], net["fxmax"], net["fymin"], net["fymax"]],
-            dtype=torch.float32, device=device
-        ))
-        net_w.append(net["weight"])
+        n_pins = len(net["hard_idx"])
+        if n_pins == 0:
+            continue
+        if n_pins not in groups:
+            groups[n_pins] = ([], [], [], [], [])
+        g = groups[n_pins]
+        g[0].append(net["hard_idx"])
+        g[1].append(net["hard_ox"])
+        g[2].append(net["hard_oy"])
+        g[3].append([net["fxmin"], net["fxmax"], net["fymin"], net["fymax"]])
+        g[4].append(net["weight"])
 
-    return net_hard_idx, net_hard_ox, net_hard_oy, net_fixed_bbox, torch.tensor(net_w, device=device)
+    batches = []
+    for n_pins, (idx_l, ox_l, oy_l, fb_l, w_l) in groups.items():
+        idx_batch = torch.tensor(np.array(idx_l), dtype=torch.long, device=device)  # [B, P]
+        ox_batch = torch.tensor(np.array(ox_l), dtype=torch.float32, device=device)
+        oy_batch = torch.tensor(np.array(oy_l), dtype=torch.float32, device=device)
+        fb_batch = torch.tensor(fb_l, dtype=torch.float32, device=device)  # [B, 4]
+        w_batch = torch.tensor(w_l, dtype=torch.float32, device=device)  # [B]
+        batches.append((idx_batch, ox_batch, oy_batch, fb_batch, w_batch))
+
+    return batches
 
 
-def _lse_hpwl(pos: torch.Tensor, net_hard_idx: list, net_hard_ox: list,
-              net_hard_oy: list, net_fixed_bbox: list, net_weights: torch.Tensor,
+def _lse_hpwl(pos: torch.Tensor, net_batches: list,
               gamma: float = 10.0) -> torch.Tensor:
     """
-    Differentiable HPWL via log-sum-exp, including pin offsets and fixed pins.
+    Vectorized differentiable HPWL via log-sum-exp.
 
-    For each net: pin positions = pos[hard_idx] + offset, plus fixed bbox bounds.
+    Processes all nets of the same pin count in a single batched operation.
     """
     total = torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
-    INF = float("inf")
 
-    for k in range(len(net_hard_idx)):
-        idx = net_hard_idx[k]
-        ox = net_hard_ox[k]
-        oy = net_hard_oy[k]
-        fb = net_fixed_bbox[k]
+    for idx_batch, ox_batch, oy_batch, fb_batch, w_batch in net_batches:
+        # idx_batch: [B, P], ox/oy: [B, P], fb: [B, 4], w: [B]
+        B, P = idx_batch.shape
 
-        # Hard macro pin positions
-        px = pos[idx, 0] + ox  # [num_pins]
-        py = pos[idx, 1] + oy
+        # Gather pin positions: [B, P]
+        px = pos[idx_batch, 0] + ox_batch
+        py = pos[idx_batch, 1] + oy_batch
 
-        # Include fixed pin bbox if present
-        fxmin, fxmax, fymin, fymax = fb[0], fb[1], fb[2], fb[3]
-        has_fixed = fxmin < 1e18
+        # Check which nets have fixed pins (fxmin < 1e18)
+        has_fixed = fb_batch[:, 0] < 1e18  # [B]
 
-        if has_fixed:
-            # Add fixed pin positions as additional "pins"
-            # Use the bbox corners as representatives
-            fx = torch.tensor([fxmin, fxmax], device=pos.device, dtype=pos.dtype)
-            fy = torch.tensor([fymin, fymax], device=pos.device, dtype=pos.dtype)
-            px = torch.cat([px, fx])
-            py = torch.cat([py, fy])
+        if has_fixed.any():
+            # For nets with fixed pins, append fixed bbox corners
+            # fxmin, fxmax, fymin, fymax -> two extra "pins"
+            fx = fb_batch[:, :2]  # [B, 2] - fxmin, fxmax
+            fy = fb_batch[:, 2:]  # [B, 2] - fymin, fymax
 
-        if len(px) < 2:
+            # Mask out fixed pins for nets without them (set to 0, won't affect LSE much)
+            mask = has_fixed.unsqueeze(1).float()  # [B, 1]
+            # Use large negative values for nets without fixed pins so they don't affect logsumexp
+            big = torch.tensor(0.0, device=pos.device)
+            fx_masked = torch.where(has_fixed.unsqueeze(1), fx, px[:, :1].detach().expand_as(fx))
+            fy_masked = torch.where(has_fixed.unsqueeze(1), fy, py[:, :1].detach().expand_as(fy))
+
+            px_full = torch.cat([px, fx_masked], dim=1)  # [B, P+2]
+            py_full = torch.cat([py, fy_masked], dim=1)
+        else:
+            px_full = px
+            py_full = py
+
+        if px_full.shape[1] < 2:
             continue
 
-        # LSE approximation: max ≈ γ·log(Σexp(x/γ)), min ≈ -γ·log(Σexp(-x/γ))
-        hpwl_x = gamma * (torch.logsumexp(px / gamma, 0) + torch.logsumexp(-px / gamma, 0))
-        hpwl_y = gamma * (torch.logsumexp(py / gamma, 0) + torch.logsumexp(-py / gamma, 0))
+        # LSE: [B]
+        hpwl_x = gamma * (torch.logsumexp(px_full / gamma, 1) + torch.logsumexp(-px_full / gamma, 1))
+        hpwl_y = gamma * (torch.logsumexp(py_full / gamma, 1) + torch.logsumexp(-py_full / gamma, 1))
 
-        total = total + net_weights[k] * (hpwl_x + hpwl_y)
+        total = total + (w_batch * (hpwl_x + hpwl_y)).sum()
 
     return total
 
@@ -219,8 +231,8 @@ class LearningPlacer(BasePlacer):
     """
 
     def __init__(self, seed: int = 42,
-                 gnn_epochs: int = 150,
-                 refine_epochs: int = 600,
+                 gnn_epochs: int = 80,
+                 refine_epochs: int = 300,
                  gnn_lr: float = 3e-3,
                  refine_lr: float = 5.0,
                  gamma_start: float = 50.0,
@@ -255,10 +267,9 @@ class LearningPlacer(BasePlacer):
         else:
             nets_raw, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        # Build net tensors for differentiable HPWL
+        # Build batched net tensors for vectorized HPWL
         device = torch.device("cpu")
-        net_hard_idx, net_hard_ox, net_hard_oy, net_fixed_bbox, net_weights = \
-            _build_net_tensors(nets_raw, device)
+        net_batches = _build_net_tensors(nets_raw, device)
 
         # ── Build adjacency from nets ────────────────────────────────────
         adj = torch.zeros(n_hard, n_hard)
@@ -305,8 +316,7 @@ class LearningPlacer(BasePlacer):
             if fixed_mask.any():
                 pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
 
-            loss_wl = _lse_hpwl(pos, net_hard_idx, net_hard_ox, net_hard_oy,
-                                net_fixed_bbox, net_weights, gamma)
+            loss_wl = _lse_hpwl(pos, net_batches, gamma)
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * 0.01
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * 0.1
 
@@ -348,8 +358,7 @@ class LearningPlacer(BasePlacer):
             if fixed_mask.any():
                 pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
 
-            loss_wl = _lse_hpwl(pos, net_hard_idx, net_hard_ox, net_hard_oy,
-                                net_fixed_bbox, net_weights, gamma)
+            loss_wl = _lse_hpwl(pos, net_batches, gamma)
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
 
