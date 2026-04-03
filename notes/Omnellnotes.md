@@ -37,4 +37,49 @@ Samla research papers till claude
 
 ### Analytical Placer (PLACER_METHOD=analytical)
 
-*Results pending...*
+**Method:** Differentiable placement with Adam optimizer.
+- 2000 iterations, lr=5.0
+- LSE-HPWL with annealed gamma (50→5)
+- Gaussian density penalty on 32x32 grid
+- Differentiable overlap penalty (weight annealed 0.01→10.0)
+- Legalization post-processing (minimum displacement)
+
+| Benchmark | proxy  | wl    | den   | cong  | Time    |
+|-----------|--------|-------|-------|-------|---------|
+| ibm01     | 1.3845 | 0.103 | 1.017 | 1.546 |  10.07s |
+| ibm02     | 1.7839 | 0.089 | 0.920 | 2.470 |   7.40s |
+| ibm03     | 1.6980 | 0.095 | 1.054 | 2.152 |   7.75s |
+| ibm04     | 1.6478 | 0.082 | 1.058 | 2.074 |  17.59s |
+| ibm06     | 1.9669 | 0.071 | 0.989 | 2.803 |   5.16s |
+| ibm07     | 1.7728 | 0.074 | 1.060 | 2.338 |   7.24s |
+| ibm08     | 1.8069 | 0.076 | 1.085 | 2.377 |  16.97s |
+| ibm09     | 1.3438 | 0.063 | 1.052 | 1.509 |   9.06s |
+| ibm10     | 1.7661 | 0.066 | 1.003 | 2.398 |  55.92s |
+| ibm11     | 1.4751 | 0.061 | 1.079 | 1.748 |  15.39s |
+| ibm12     | 2.0331 | 0.068 | 1.027 | 2.904 |  40.36s |
+| ibm13     | 1.6363 | 0.060 | 1.090 | 2.063 |  20.43s |
+| ibm14     | 1.7747 | 0.055 | 1.078 | 2.362 |  99.19s |
+| ibm15     | 1.8680 | 0.060 | 1.130 | 2.485 |  15.87s |
+| ibm16     | 1.8090 | 0.051 | 1.056 | 2.461 |  34.04s |
+| ibm17     | 1.8310 | 0.056 | 1.025 | 2.525 |  35.99s |
+| ibm18     | 1.8287 | 0.055 | 1.097 | 2.451 |   7.45s |
+| **AVG**   |**1.7310**|     |       |       | 406s    |
+
+- +18.5% better than SA baseline (2.13)
+- -18.7% worse than RePlAce (1.46)
+- First implementation — room for tuning (lr, gamma schedule, density weight, more iters)
+
+### Comparison Summary
+
+| Method     | Avg Proxy | vs SA Baseline | vs RePlAce |
+|------------|-----------|----------------|------------|
+| SA baseline| 2.1251    | —              | +45.8%     |
+| **SA ours**| **1.5765**| **-25.8%**     | +8.1%      |
+| Analytical | 1.7310    | -18.5%         | +18.7%     |
+| will_seed  | 1.53      | -28.0%         | +4.9%      |
+| RePlAce    | 1.4578    | -31.4%         | —          |
+
+### Observations / Next Steps
+- SA is our best method (avg 1.58), but ibm04 congestion remains problematic
+- Analytical placer works but needs tuning — congestion is high across the board
+- Potential improvements: use analytical as initial placement for SA (hybrid), tune density/congestion weights, increase analytical iters
