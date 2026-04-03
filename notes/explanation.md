@@ -1,5 +1,5 @@
 ## Team setup
-There are 3 people working in parallel via LiveShare, each building a different
+There are 3 people working in parallel, each building a different
 placement strategy. ALL methods live in the same repo under submissions/ and share
 a single entry point (submissions/placer.py). You can benchmark ANY method at any
 time by setting the PLACER_METHOD env var:
