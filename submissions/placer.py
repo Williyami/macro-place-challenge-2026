@@ -4,9 +4,10 @@ Competition entry point.
 Wraps the current best placer so the evaluation harness can load it via:
     uv run evaluate submissions/placer.py
 
-To switch approaches, change the import/class alias below.
+To switch approaches, change METHOD below.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,29 +17,35 @@ if _PROJECT_ROOT not in sys.path:
 
 import torch
 from macro_place.benchmark import Benchmark
-from submissions.sa_placer import SAPlacer
+
+# ── Strategy selection ──────────────────────────────────────────────────────
+# Set METHOD env var or change this default to switch:
+#   "sa"        — full net-HPWL simulated annealing (current best)
+#   "will_seed" — edge-based fast SA
+METHOD = os.environ.get("PLACER_METHOD", "sa")
 
 
 class MacroPlacer:
     """
     Entry point for the evaluation harness.
-
-    The harness discovers the first class in this file with a ``place`` method
-    and calls ``place(benchmark)``.  This class delegates to the best available
-    placer implementation.
-
-    To try a different approach:
-        from submissions.analytical_placer import AnalyticalPlacer as _Inner
+    Delegates to the selected placer implementation.
     """
 
     def __init__(self, seed: int = 42):
-        self._inner = SAPlacer(
-            seed=seed,
-            max_iters=100_000,
-            run_fd=False,
-            snapshot_interval=2_000,
-            trace_interval=500,
-        )
+        if METHOD == "will_seed":
+            from submissions.will_seed.placer import WillSeedPlacer
+            self._inner = WillSeedPlacer(seed=seed)
+        else:
+            from submissions.sa_placer import SAPlacer
+            self._inner = SAPlacer(
+                seed=seed,
+                max_iters=120_000,
+                run_fd=False,
+                snapshot_interval=2_000,
+                trace_interval=500,
+                t_start_factor=0.12,
+                t_end_factor=0.0008,
+            )
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         return self._inner.place(benchmark)

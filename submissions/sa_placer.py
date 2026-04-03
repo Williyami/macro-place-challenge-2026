@@ -300,6 +300,8 @@ def _sa_refine(
     snapshot_callback=None,
     trace_interval: int = 0,
     trace_callback=None,
+    t_start_factor: float = 0.15,
+    t_end_factor: float = 0.001,
 ) -> np.ndarray:
     """SA loop minimising full net-HPWL while enforcing hard-macro legality."""
     rng = random.Random(seed)
@@ -325,8 +327,8 @@ def _sa_refine(
     best_pos = pos.copy()
     best_hpwl = current_hpwl
 
-    T_start = max(cw, ch) * 0.15
-    T_end   = max(cw, ch) * 0.001
+    T_start = max(cw, ch) * t_start_factor
+    T_end   = max(cw, ch) * t_end_factor
 
     if trace_callback is not None:
         trace_callback(
@@ -512,6 +514,8 @@ class SAPlacer(BasePlacer):
         capture_snapshots: bool = True,
         snapshot_interval: int = 2_000,
         trace_interval: int = 500,
+        t_start_factor: float = 0.15,
+        t_end_factor: float = 0.001,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -519,6 +523,8 @@ class SAPlacer(BasePlacer):
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
         self.trace_interval = trace_interval
+        self.t_start_factor = t_start_factor
+        self.t_end_factor = t_end_factor
         self.debug_snapshots = []
         self.debug_trace = []
 
@@ -584,6 +590,8 @@ class SAPlacer(BasePlacer):
                 snapshot_callback=capture_snapshot if self.capture_snapshots else None,
                 trace_interval=self.trace_interval,
                 trace_callback=capture_trace,
+                t_start_factor=self.t_start_factor,
+                t_end_factor=self.t_end_factor,
             )
 
         # Build full placement tensor
