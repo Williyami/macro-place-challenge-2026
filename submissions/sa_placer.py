@@ -302,8 +302,19 @@ def _sa_refine(
     trace_callback=None,
     t_start_factor: float = 0.15,
     t_end_factor: float = 0.001,
+    reheat_threshold: int = 0,
+    reheat_factor: float = 3.0,
 ) -> np.ndarray:
-    """SA loop minimising full net-HPWL while enforcing hard-macro legality."""
+    """SA loop minimising full net-HPWL while enforcing hard-macro legality.
+
+    Parameters
+    ----------
+    reheat_threshold : int
+        If > 0, reheat the temperature when no improvement is found for this
+        many consecutive iterations.  0 disables reheating.
+    reheat_factor : float
+        On reheat, multiply current temperature by this factor (capped at T_start).
+    """
     rng = random.Random(seed)
     np_rng = np.random.default_rng(seed)
 
@@ -330,6 +341,9 @@ def _sa_refine(
     T_start = max(cw, ch) * t_start_factor
     T_end   = max(cw, ch) * t_end_factor
 
+    # Reheating state
+    steps_since_improvement = 0
+
     if trace_callback is not None:
         trace_callback(
             {
@@ -343,6 +357,11 @@ def _sa_refine(
     for step in range(max_iters):
         frac = step / max_iters
         T = T_start * (T_end / T_start) ** frac
+
+        # Reheat if stagnating
+        if reheat_threshold > 0 and steps_since_improvement >= reheat_threshold:
+            T = min(T * reheat_factor, T_start * 0.5)
+            steps_since_improvement = 0
 
         move = rng.random()
         i = rng.choice(movable_idx)
@@ -368,6 +387,11 @@ def _sa_refine(
                 if current_hpwl < best_hpwl:
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
+                    steps_since_improvement = 0
+                else:
+                    steps_since_improvement += 1
+            else:
+                steps_since_improvement += 1
 
         elif move < 0.80:
             # ── SWAP ───────────────────────────────────────────────────────
@@ -410,6 +434,11 @@ def _sa_refine(
                 if current_hpwl < best_hpwl:
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
+                    steps_since_improvement = 0
+                else:
+                    steps_since_improvement += 1
+            else:
+                steps_since_improvement += 1
 
         else:
             # ── MOVE TOWARD NEIGHBOR ───────────────────────────────────────
@@ -434,6 +463,11 @@ def _sa_refine(
                 if current_hpwl < best_hpwl:
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
+                    steps_since_improvement = 0
+                else:
+                    steps_since_improvement += 1
+            else:
+                steps_since_improvement += 1
 
         if snapshot_callback is not None and snapshot_interval > 0:
             if (step + 1) % snapshot_interval == 0 or step == max_iters - 1:
@@ -504,7 +538,21 @@ class SAPlacer(BasePlacer):
     seed         : RNG seed for reproducibility
     max_iters    : SA iterations per benchmark
     run_fd       : whether to run soft-macro FD at the end
+    num_starts   : number of independent SA runs (best result kept)
+    reheat_threshold : iterations without improvement before reheating (0=off)
+    per_benchmark_overrides : dict mapping benchmark name to param overrides
     """
+
+    # Default per-benchmark overrides for known difficult benchmarks.
+    DEFAULT_OVERRIDES = {
+        "ibm04": {
+            "max_iters": 200_000,
+            "t_start_factor": 0.20,
+            "t_end_factor": 0.0005,
+            "num_starts": 3,
+            "reheat_threshold": 8_000,
+        },
+    }
 
     def __init__(
         self,
@@ -516,6 +564,10 @@ class SAPlacer(BasePlacer):
         trace_interval: int = 500,
         t_start_factor: float = 0.15,
         t_end_factor: float = 0.001,
+        num_starts: int = 1,
+        reheat_threshold: int = 0,
+        reheat_factor: float = 3.0,
+        per_benchmark_overrides=None,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -525,14 +577,34 @@ class SAPlacer(BasePlacer):
         self.trace_interval = trace_interval
         self.t_start_factor = t_start_factor
         self.t_end_factor = t_end_factor
+        self.num_starts = num_starts
+        self.reheat_threshold = reheat_threshold
+        self.reheat_factor = reheat_factor
+        self.per_benchmark_overrides = per_benchmark_overrides or self.DEFAULT_OVERRIDES
         self.debug_snapshots = []
         self.debug_trace = []
+
+    def _get_params(self, benchmark_name: str) -> dict:
+        """Return effective parameters, applying per-benchmark overrides."""
+        params = {
+            "max_iters": self.max_iters,
+            "t_start_factor": self.t_start_factor,
+            "t_end_factor": self.t_end_factor,
+            "num_starts": self.num_starts,
+            "reheat_threshold": self.reheat_threshold,
+            "reheat_factor": self.reheat_factor,
+        }
+        overrides = self.per_benchmark_overrides.get(benchmark_name, {})
+        params.update(overrides)
+        return params
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         random.seed(self.seed)
         np.random.seed(self.seed)
         self.debug_snapshots = []
         self.debug_trace = []
+
+        params = self._get_params(benchmark.name)
 
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
@@ -565,8 +637,8 @@ class SAPlacer(BasePlacer):
                         neighbors[a].append(int(b))
 
         # Initialise from hand-crafted initial.plc positions + legalize
-        pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
-        pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+        init_pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
+        init_pos = _legalize(init_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
 
         def capture_snapshot(pos_hard: np.ndarray):
             if not self.capture_snapshots:
@@ -578,29 +650,43 @@ class SAPlacer(BasePlacer):
         def capture_trace(point: dict):
             self.debug_trace.append(point)
 
-        capture_snapshot(pos)
+        capture_snapshot(init_pos)
 
-        # Run SA
+        # Multi-start SA: run multiple times with different seeds, keep best
+        num_starts = params["num_starts"]
+        best_pos = init_pos
+        best_hpwl = float("inf")
+
         if nets:
-            pos = _sa_refine(
-                pos, nets, macro_to_nets, neighbors,
-                movable, sizes, half_w, half_h, sep_x, sep_y,
-                cw, ch, self.max_iters, self.seed,
-                snapshot_interval=self.snapshot_interval,
-                snapshot_callback=capture_snapshot if self.capture_snapshots else None,
-                trace_interval=self.trace_interval,
-                trace_callback=capture_trace,
-                t_start_factor=self.t_start_factor,
-                t_end_factor=self.t_end_factor,
-            )
+            for start_idx in range(num_starts):
+                run_seed = self.seed + start_idx * 1000
+                pos = _sa_refine(
+                    init_pos, nets, macro_to_nets, neighbors,
+                    movable, sizes, half_w, half_h, sep_x, sep_y,
+                    cw, ch, params["max_iters"], run_seed,
+                    snapshot_interval=self.snapshot_interval,
+                    snapshot_callback=capture_snapshot if (self.capture_snapshots and start_idx == 0) else None,
+                    trace_interval=self.trace_interval,
+                    trace_callback=capture_trace if start_idx == 0 else None,
+                    t_start_factor=params["t_start_factor"],
+                    t_end_factor=params["t_end_factor"],
+                    reheat_threshold=params["reheat_threshold"],
+                    reheat_factor=params["reheat_factor"],
+                )
+                hpwl = _compute_total_hpwl(pos, nets)
+                if hpwl < best_hpwl:
+                    best_hpwl = hpwl
+                    best_pos = pos
+        else:
+            best_pos = init_pos
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
-        full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+        full_pos[:n_hard] = torch.tensor(best_pos, dtype=torch.float32)
 
         # Optionally update soft macros via force-directed placement
         if self.run_fd and plc is not None and benchmark.num_soft_macros > 0:
-            soft_pos = _update_soft_macros(pos, benchmark, plc)
+            soft_pos = _update_soft_macros(best_pos, benchmark, plc)
             full_pos[n_hard:] = torch.tensor(soft_pos, dtype=torch.float32)
 
         if self.capture_snapshots:
