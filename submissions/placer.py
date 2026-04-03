@@ -4,7 +4,12 @@ Competition entry point.
 Wraps the current best placer so the evaluation harness can load it via:
     uv run evaluate submissions/placer.py
 
-To switch approaches, change METHOD below.
+Switch methods via env var:
+    PLACER_METHOD=sa          uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=analytical  uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=hybrid      uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=learning    uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=will_seed   uv run evaluate submissions/placer.py --all
 """
 
 import os
@@ -19,9 +24,8 @@ import torch
 from macro_place.benchmark import Benchmark
 
 # ── Strategy selection ──────────────────────────────────────────────────────
-# Set METHOD env var or change this default to switch:
-#   "sa"        — full net-HPWL simulated annealing (current best)
-#   "will_seed" — edge-based fast SA
+# Set PLACER_METHOD env var to switch between approaches.
+# Each team member works on their own module under submissions/.
 METHOD = os.environ.get("PLACER_METHOD", "sa")
 
 
@@ -32,10 +36,7 @@ class MacroPlacer:
     """
 
     def __init__(self, seed: int = 42):
-        if METHOD == "will_seed":
-            from submissions.will_seed.placer import WillSeedPlacer
-            self._inner = WillSeedPlacer(seed=seed)
-        else:
+        if METHOD == "sa":
             from submissions.sa_placer import SAPlacer
             self._inner = SAPlacer(
                 seed=seed,
@@ -45,6 +46,23 @@ class MacroPlacer:
                 trace_interval=500,
                 t_start_factor=0.12,
                 t_end_factor=0.0008,
+            )
+        elif METHOD == "analytical":
+            from submissions.analytical_placer import AnalyticalPlacer
+            self._inner = AnalyticalPlacer(seed=seed)
+        elif METHOD == "hybrid":
+            from submissions.hybrid_placer import HybridPlacer
+            self._inner = HybridPlacer(seed=seed)
+        elif METHOD == "learning":
+            from submissions.learning_placer import LearningPlacer
+            self._inner = LearningPlacer(seed=seed)
+        elif METHOD == "will_seed":
+            from submissions.will_seed.placer import WillSeedPlacer
+            self._inner = WillSeedPlacer(seed=seed)
+        else:
+            raise ValueError(
+                f"Unknown PLACER_METHOD={METHOD!r}. "
+                "Options: sa, analytical, hybrid, learning, will_seed"
             )
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
