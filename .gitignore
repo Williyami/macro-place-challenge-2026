@@ -58,6 +58,9 @@ results/
 !benchmarks/processed/public/
 !benchmarks/processed/public/*.pt
 
+# Research papers (large PDFs, not for repo)
+notes/researchmaterial/
+
 # Logs
 *.log
 logs/

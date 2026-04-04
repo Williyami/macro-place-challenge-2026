@@ -223,6 +223,64 @@ def _compute_total_hpwl(pos: np.ndarray, nets: list) -> float:
     return sum(_net_hpwl(net, pos) for net in nets)
 
 
+# ── density grid helpers ──────────────────────────────────────────────────────
+
+def _macro_cell_overlaps(mx, my, mw, mh, grid_col, grid_row, gw, gh):
+    """Return list of (cell_idx, overlap_area) for a macro centered at (mx,my)."""
+    x_lo, x_hi = mx - mw / 2, mx + mw / 2
+    y_lo, y_hi = my - mh / 2, my + mh / 2
+    c_min = max(0, int(x_lo / gw))
+    c_max = min(grid_col - 1, int(x_hi / gw))
+    r_min = max(0, int(y_lo / gh))
+    r_max = min(grid_row - 1, int(y_hi / gh))
+    result = []
+    for r in range(r_min, r_max + 1):
+        cy_lo, cy_hi = r * gh, (r + 1) * gh
+        ov_y = min(y_hi, cy_hi) - max(y_lo, cy_lo)
+        if ov_y <= 0:
+            continue
+        for c in range(c_min, c_max + 1):
+            cx_lo, cx_hi = c * gw, (c + 1) * gw
+            ov_x = min(x_hi, cx_hi) - max(x_lo, cx_lo)
+            if ov_x > 0:
+                result.append((r * grid_col + c, ov_x * ov_y))
+    return result
+
+
+def _build_density_grid(pos, sizes, n_hard, grid_col, grid_row, gw, gh,
+                        benchmark=None):
+    """Build initial density grid (total macro area per cell)."""
+    grid = np.zeros(grid_col * grid_row)
+    for i in range(n_hard):
+        for ci, area in _macro_cell_overlaps(
+            pos[i, 0], pos[i, 1], sizes[i, 0], sizes[i, 1],
+            grid_col, grid_row, gw, gh,
+        ):
+            grid[ci] += area
+    # Include soft macros (fixed during SA)
+    if benchmark is not None:
+        all_sizes = benchmark.macro_sizes.numpy()
+        all_pos = benchmark.macro_positions.numpy()
+        for i in range(n_hard, len(all_sizes)):
+            for ci, area in _macro_cell_overlaps(
+                all_pos[i, 0], all_pos[i, 1],
+                all_sizes[i, 0], all_sizes[i, 1],
+                grid_col, grid_row, gw, gh,
+            ):
+                grid[ci] += area
+    return grid
+
+
+def _density_cost_from_grid(grid_occupied, grid_area, n_cells):
+    """Compute density cost matching evaluator: 0.5 * avg of top 10%."""
+    densities = grid_occupied / grid_area
+    nonzero = sorted([float(d) for d in densities if d > 0], reverse=True)
+    if not nonzero:
+        return 0.0
+    cnt = max(1, n_cells // 10)
+    return 0.5 * sum(nonzero[:cnt]) / cnt
+
+
 # ── legalization (minimum displacement) ─────────────────────────────────────
 
 def _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n, sep_x, sep_y):
@@ -304,8 +362,12 @@ def _sa_refine(
     t_end_factor: float = 0.001,
     reheat_threshold: int = 0,
     reheat_factor: float = 3.0,
+    density_weight: float = 0.0,
+    grid_col: int = 0,
+    grid_row: int = 0,
+    benchmark=None,
 ) -> np.ndarray:
-    """SA loop minimising full net-HPWL while enforcing hard-macro legality.
+    """SA loop minimising proxy cost (HPWL + density + periphery).
 
     Parameters
     ----------
@@ -314,6 +376,12 @@ def _sa_refine(
         many consecutive iterations.  0 disables reheating.
     reheat_factor : float
         On reheat, multiply current temperature by this factor (capped at T_start).
+    density_weight : float
+        Weight for density penalty in HPWL units.  0 disables density tracking.
+    grid_col, grid_row : int
+        Grid dimensions for density tracking.
+    benchmark : Benchmark or None
+        Needed for soft-macro density contributions.
     """
     rng = random.Random(seed)
     np_rng = np.random.default_rng(seed)
@@ -323,6 +391,7 @@ def _sa_refine(
         return pos
 
     pos = pos.copy()
+    n_hard = len(movable)
 
     GAP = 0.05  # overlap safety gap (μm)
 
@@ -340,6 +409,22 @@ def _sa_refine(
 
     T_start = max(cw, ch) * t_start_factor
     T_end   = max(cw, ch) * t_end_factor
+
+    # ── Density tracking ──────────────────────────────────────────────────
+    use_density = density_weight > 0 and grid_col > 0 and grid_row > 0
+    if use_density:
+        gw = cw / grid_col
+        gh = ch / grid_row
+        grid_area = gw * gh
+        n_grid = grid_col * grid_row
+        grid_occupied = _build_density_grid(
+            pos, sizes, n_hard, grid_col, grid_row, gw, gh, benchmark,
+        )
+        current_density = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
+        best_cost = current_hpwl + density_weight * current_density
+    else:
+        current_density = 0.0
+        best_cost = current_hpwl
 
     # Reheating state
     steps_since_improvement = 0
@@ -379,18 +464,36 @@ def _sa_refine(
                 continue
 
             pos[i, 0] = old_x; pos[i, 1] = old_y
-            delta = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
+            delta_hpwl = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
+            delta = delta_hpwl
+
+            # Density penalty
+            old_cells = new_cells = None
+            if use_density:
+                old_cells = _macro_cell_overlaps(old_x, old_y, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                new_cells = _macro_cell_overlaps(new_x, new_y, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                for ci, a in old_cells: grid_occupied[ci] -= a
+                for ci, a in new_cells: grid_occupied[ci] += a
+                new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
+                delta += density_weight * (new_dens - current_density)
 
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_x; pos[i, 1] = new_y
-                current_hpwl += delta
-                if current_hpwl < best_hpwl:
+                current_hpwl += delta_hpwl
+                if use_density:
+                    current_density = new_dens
+                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if cost < best_cost:
+                    best_cost = cost
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
                     steps_since_improvement = 0
                 else:
                     steps_since_improvement += 1
             else:
+                if use_density:
+                    for ci, a in new_cells: grid_occupied[ci] -= a
+                    for ci, a in old_cells: grid_occupied[ci] += a
                 steps_since_improvement += 1
 
         elif move < 0.80:
@@ -425,19 +528,43 @@ def _sa_refine(
             pos[i, 0] = old_x;  pos[i, 1] = old_y
             pos[j, 0] = old_jx; pos[j, 1] = old_jy
             old_hpwl_aff = sum(_net_hpwl(nets[k], pos) for k in affected)
-            delta = new_hpwl_aff - old_hpwl_aff
+            delta_hpwl = new_hpwl_aff - old_hpwl_aff
+            delta = delta_hpwl
+
+            # Density penalty for swap (two macros move)
+            old_cells_i = old_cells_j = new_cells_i = new_cells_j = None
+            if use_density:
+                old_cells_i = _macro_cell_overlaps(old_x, old_y, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                old_cells_j = _macro_cell_overlaps(old_jx, old_jy, sizes[j, 0], sizes[j, 1], grid_col, grid_row, gw, gh)
+                new_cells_i = _macro_cell_overlaps(new_ix, new_iy, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                new_cells_j = _macro_cell_overlaps(new_jx, new_jy, sizes[j, 0], sizes[j, 1], grid_col, grid_row, gw, gh)
+                for ci, a in old_cells_i: grid_occupied[ci] -= a
+                for ci, a in old_cells_j: grid_occupied[ci] -= a
+                for ci, a in new_cells_i: grid_occupied[ci] += a
+                for ci, a in new_cells_j: grid_occupied[ci] += a
+                new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
+                delta += density_weight * (new_dens - current_density)
 
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_ix; pos[i, 1] = new_iy
                 pos[j, 0] = new_jx; pos[j, 1] = new_jy
-                current_hpwl += delta
-                if current_hpwl < best_hpwl:
+                current_hpwl += delta_hpwl
+                if use_density:
+                    current_density = new_dens
+                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if cost < best_cost:
+                    best_cost = cost
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
                     steps_since_improvement = 0
                 else:
                     steps_since_improvement += 1
             else:
+                if use_density:
+                    for ci, a in new_cells_i: grid_occupied[ci] -= a
+                    for ci, a in new_cells_j: grid_occupied[ci] -= a
+                    for ci, a in old_cells_i: grid_occupied[ci] += a
+                    for ci, a in old_cells_j: grid_occupied[ci] += a
                 steps_since_improvement += 1
 
         else:
@@ -455,18 +582,36 @@ def _sa_refine(
                 continue
 
             pos[i, 0] = old_x; pos[i, 1] = old_y
-            delta = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
+            delta_hpwl = _delta_hpwl(i, new_x, new_y, pos, nets, macro_to_nets)
+            delta = delta_hpwl
+
+            # Density penalty
+            old_cells = new_cells = None
+            if use_density:
+                old_cells = _macro_cell_overlaps(old_x, old_y, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                new_cells = _macro_cell_overlaps(new_x, new_y, sizes[i, 0], sizes[i, 1], grid_col, grid_row, gw, gh)
+                for ci, a in old_cells: grid_occupied[ci] -= a
+                for ci, a in new_cells: grid_occupied[ci] += a
+                new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
+                delta += density_weight * (new_dens - current_density)
 
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_x; pos[i, 1] = new_y
-                current_hpwl += delta
-                if current_hpwl < best_hpwl:
+                current_hpwl += delta_hpwl
+                if use_density:
+                    current_density = new_dens
+                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if cost < best_cost:
+                    best_cost = cost
                     best_hpwl = current_hpwl
                     best_pos = pos.copy()
                     steps_since_improvement = 0
                 else:
                     steps_since_improvement += 1
             else:
+                if use_density:
+                    for ci, a in new_cells: grid_occupied[ci] -= a
+                    for ci, a in old_cells: grid_occupied[ci] += a
                 steps_since_improvement += 1
 
         if snapshot_callback is not None and snapshot_interval > 0:
@@ -652,6 +797,30 @@ class SAPlacer(BasePlacer):
 
         capture_snapshot(init_pos)
 
+        # ── Density weight calibration ────────────────────────────────────
+        # proxy = 1.0*WL_norm + 0.5*density + 0.5*congestion
+        # Convert density_penalty to HPWL-equivalent units so SA can
+        # co-optimise both in a single acceptance criterion.
+        grid_col = grid_row = 0
+        density_w = 0.0
+        if plc is not None and nets:
+            try:
+                grid_col, grid_row = plc.grid_col, plc.grid_row
+                if grid_col > 0 and grid_row > 0:
+                    from macro_place.objective import _set_placement
+                    full_init = benchmark.macro_positions.clone()
+                    full_init[:n_hard] = torch.tensor(init_pos, dtype=torch.float32)
+                    _set_placement(plc, full_init, benchmark)
+                    wl_norm = plc.get_cost()
+                    raw_hpwl = _compute_total_hpwl(init_pos, nets)
+                    if wl_norm > 1e-10 and raw_hpwl > 1e-10:
+                        # density_weight converts: delta_density → HPWL-equivalent
+                        # proxy uses weight 0.5 for density, so:
+                        density_w = 0.5 * raw_hpwl / wl_norm
+            except Exception:
+                grid_col = grid_row = 0
+                density_w = 0.0
+
         # Multi-start SA: run multiple times with different seeds, keep best
         num_starts = params["num_starts"]
         best_pos = init_pos
@@ -672,6 +841,10 @@ class SAPlacer(BasePlacer):
                     t_end_factor=params["t_end_factor"],
                     reheat_threshold=params["reheat_threshold"],
                     reheat_factor=params["reheat_factor"],
+                    density_weight=density_w,
+                    grid_col=grid_col,
+                    grid_row=grid_row,
+                    benchmark=benchmark,
                 )
                 hpwl = _compute_total_hpwl(pos, nets)
                 if hpwl < best_hpwl:

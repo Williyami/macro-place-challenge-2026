@@ -6,6 +6,34 @@
 
 Partcl and Hudson River Trading are excited to co-host a competition to solve the macro placement problem. 
 
+## 🏅 Leaderboard
+
+Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks.
+
+| Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Runtime | Verified |
+|------|------|---------------|------|-------|----------|---------|----------|
+| 1 | "UT Austin" (DREAMPlace) | 1.4076 | — | — | 0 | 17s/bench |  |
+| 2 | "BakaBobo" (Spread+Refine) | 1.4403 | — | — | 0 | 212s/bench |  |
+| 3 | "Convex Optimization" (UWaterloo Student) | 1.4556 | — | — | 0 | 16s total |  |
+| — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — | ✅ |
+| 4 | SA Placer (ours) | 1.4850 | 1.1079 | 1.7875 | 0 | 999.38s total |  |
+| 5 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
+| 6 | HybridPlacer (ours) | 1.6977 | 1.2477 | 2.0305 | 0 | 324.72s total |  |
+| 7 | Learning Placer (ours) | 1.7060 | 1.2707 | 2.0338 | 0 | 457.74s total |  |
+| 8 | Analytical Placer (ours) | 1.7394 | 1.3438 | 2.0684 | 0 | 598.68s total |  |
+| — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — | ✅ |
+| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | ✅ |
+
+*Submit your results to appear on the leaderboard!*
+
+## 📈 Benchmark History
+
+Benchmark-history tracking for the note sections lives in:
+- [Summary](notes/benchmark%20history/benchmark_history_summary.md)
+- [Raw data](notes/benchmark%20history/benchmark_history_raw.md)
+
+![Benchmark history summary](notes/benchmark%20history/benchmark_history_full_suite.png)
+
 ## About Macro Placement
 
 Macro placement is the problem of positioning large fixed-size blocks (SRAMs, IPs, analog macros, etc.) on a chip floorplan so that routing congestion, timing, power delivery, and area constraints are balanced. Unlike standard-cell placement, macros have strong geometric and connectivity constraints, so the challenge is to explore a highly discrete design space while minimizing wirelength, avoiding blockages, and preserving downstream routability and timing quality.
@@ -218,19 +246,6 @@ Classical methods (SA, RePlAce) have been refined for decades but still have roo
   - SA and RePlAce baseline implementations
 
 - **ICCAD04 Benchmarks**: Classic macro placement benchmark suite used in academic research
-
-## 🏅 Leaderboard
-
-Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks.
-
-| Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Runtime |
-|------|------|---------------|------|-------|----------|---------|
-| — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — |
-| 1 | Will (Partcl) | **1.5338** | 1.1625 | 1.7965 | 0 | 35s |
-| — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — |
-| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s |
-
-*Submit your results to appear on the leaderboard!*
 
 ## 🤔 FAQ
 

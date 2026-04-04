@@ -319,6 +319,11 @@ def main():
         default="artifacts",
         help="Directory to save generated PNGs/GIFs for each run. Default: artifacts.",
     )
+    parser.add_argument(
+        "--no-media",
+        action="store_true",
+        help="Skip saving generated visualization bundles during evaluation.",
+    )
     args = parser.parse_args()
 
     # ── resolve paths ────────────────────────────────────────────────────
@@ -366,16 +371,17 @@ def main():
             f"{status}  [{result['runtime']:.2f}s]"
         )
 
-        bundle_dir = media_root / name
-        save_visualization_bundle(
-            benchmark=result["benchmark"],
-            initial_placement=result["initial_placement"],
-            final_placement=result["placement"],
-            output_dir=str(bundle_dir),
-            plc=result.get("plc"),
-            animation_frames=result.get("animation_frames"),
-            cost_history=result.get("cost_history"),
-        )
+        if not args.no_media:
+            bundle_dir = media_root / name
+            save_visualization_bundle(
+                benchmark=result["benchmark"],
+                initial_placement=result["initial_placement"],
+                final_placement=result["placement"],
+                output_dir=str(bundle_dir),
+                plc=result.get("plc"),
+                animation_frames=result.get("animation_frames"),
+                cost_history=result.get("cost_history"),
+            )
 
         if args.vis:
             vis_dir = Path("vis")
