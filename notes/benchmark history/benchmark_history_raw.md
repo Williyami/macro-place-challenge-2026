@@ -6,11 +6,7 @@ Generated from the note files in this directory.
 
 | Run ID | Method | Date | Title | Scope | Benchmarks Logged | Plotted Proxy | Full-Suite Avg Proxy | Total Runtime (s) | Source |
 |--------|--------|------|-------|-------|-------------------|---------------|----------------------|-------------------|--------|
-| L1 | Learning Placer | 2026-04-03 | Initial implementation (GNN + refine, no SA polish) | partial | 1 | 1.3252 | - | 192.21 | (RL method)eklundnotes.md |
-| L2 | Learning Placer | 2026-04-03 | Vectorized LSE-HPWL (GNN 80 + refine 300, no SA polish) | partial | 2 | 1.4926 | - | 9.83 | (RL method)eklundnotes.md |
-| L3 | Learning Placer | 2026-04-03 | Added SA polish + multi-start (GNN 80 + refine 400 + SA 30K, 3 starts) | partial | 1 | 1.3136 | - | 15.96 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | 2026-04-03 | Stronger density + congestion proxy + target_util=0.6 | full_suite | 17 | 1.7117 | 1.7117 | 170.83 | (RL method)eklundnotes.md |
-| L5 | Learning Placer | 2026-04-03 | Heavy SA polish (GNN 60 + refine 200 + SA 100K, 1 start) | partial | 1 | 1.2707 | - | 9.12 | (RL method)eklundnotes.md |
 | L6 | Learning Placer | 2026-04-04 | Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
@@ -22,10 +18,6 @@ Generated from the note files in this directory.
 
 | Run ID | Method | Benchmark | Proxy | WL | Density | Congestion | Time (s) | Source |
 |--------|--------|-----------|-------|----|---------|------------|----------|--------|
-| L1 | Learning Placer | ibm01 | 1.3252 | 0.076 | 1.043 | 1.456 | 192.21 | (RL method)eklundnotes.md |
-| L2 | Learning Placer | ibm01 | 1.3224 | 0.074 | 1.077 | 1.420 | 3.76 | (RL method)eklundnotes.md |
-| L2 | Learning Placer | ibm04 | 1.6628 | 0.071 | 1.098 | 2.085 | 6.07 | (RL method)eklundnotes.md |
-| L3 | Learning Placer | ibm01 | 1.3136 | 0.069 | 1.077 | 1.412 | 15.96 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm01 | 1.2429 | 0.069 | 1.029 | 1.318 | 5.55 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm02 | 1.7320 | 0.080 | 0.960 | 2.344 | 8.87 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm03 | 1.7874 | 0.080 | 1.152 | 2.264 | 5.47 | (RL method)eklundnotes.md |
@@ -43,7 +35,6 @@ Generated from the note files in this directory.
 | L4 | Learning Placer | ibm16 | 1.7684 | 0.048 | 1.070 | 2.370 | 9.52 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm17 | 1.7908 | 0.053 | 1.011 | 2.465 | 14.32 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm18 | 1.8329 | 0.053 | 1.109 | 2.451 | 6.87 | (RL method)eklundnotes.md |
-| L5 | Learning Placer | ibm01 | 1.2707 | 0.067 | 1.046 | 1.360 | 9.12 | (RL method)eklundnotes.md |
 | L6 | Learning Placer | ibm01 | 1.2707 | 0.067 | 1.046 | 1.360 | 21.37 | (RL method)eklundnotes.md |
 | L6 | Learning Placer | ibm02 | 1.7309 | 0.079 | 0.945 | 2.358 | 21.11 | (RL method)eklundnotes.md |
 | L6 | Learning Placer | ibm03 | 1.7636 | 0.079 | 1.149 | 2.220 | 15.17 | (RL method)eklundnotes.md |

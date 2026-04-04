@@ -350,10 +350,10 @@ def write_summary_markdown(runs: list[RunRecord]) -> None:
     lines = [
         "# Benchmark History Summary",
         "",
-        "This graph summarizes the benchmark sections logged in the notes.",
+        "This graph summarizes the full-suite benchmark sections logged in the notes.",
         "",
-        "- Top plot: proxy trend over run history. For full-suite runs, this uses the logged AVG proxy. For partial runs, it uses the mean proxy of the benchmarks listed in that section.",
-        "- Bottom plot: how many benchmarks were logged in that section, so spot checks and full-suite runs are easy to distinguish.",
+        "- Top plot: proxy trend over run history using the logged AVG proxy from each full-suite run.",
+        "- Bottom plot: how many benchmarks were logged in each included run.",
         "",
         "![Benchmark history summary](benchmark_history_summary.png)",
         "",
@@ -456,6 +456,10 @@ def main() -> None:
         parser_runs, parser_rows = parser()
         runs.extend(parser_runs)
         rows.extend(parser_rows)
+
+    full_suite_ids = {run.run_id for run in runs if run.scope == "full_suite"}
+    runs = [run for run in runs if run.run_id in full_suite_ids]
+    rows = [row for row in rows if str(row["run_id"]) in full_suite_ids]
 
     def run_sort_key(run_id: str) -> tuple[int, int]:
         prefix_order = {"L": 1, "S": 2, "A": 3, "H": 4}
