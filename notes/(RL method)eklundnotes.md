@@ -1,18 +1,5 @@
 # Learning Placer — Benchmark Results Log
 
-## 2026-04-03 — Initial implementation (GNN + refine, no SA polish)
-Method: `PLACER_METHOD=learning` — GNN 150 epochs + refine 600 epochs, no SA polish
-- ibm01: proxy=1.3252 (wl=0.076 den=1.043 cong=1.456) 192.21s — OVER TIME LIMIT
-
-## 2026-04-03 — Vectorized LSE-HPWL (GNN 80 + refine 300, no SA polish)
-Method: `PLACER_METHOD=learning` — batched net HPWL, reduced epochs
-- ibm01: proxy=1.3224 (wl=0.074 den=1.077 cong=1.420) 3.76s
-- ibm04: proxy=1.6628 (wl=0.071 den=1.098 cong=2.085) 6.07s
-
-## 2026-04-03 — Added SA polish + multi-start (GNN 80 + refine 400 + SA 30K, 3 starts)
-Method: `PLACER_METHOD=learning` — SA polish t_start=0.05, gamma_end=2.0
-- ibm01: proxy=1.3136 (wl=0.069 den=1.077 cong=1.412) 15.96s
-
 ## 2026-04-03 — Stronger density + congestion proxy + target_util=0.6
 Method: `PLACER_METHOD=learning` — added top-10% congestion penalty, adaptive multi-start
 
@@ -40,10 +27,6 @@ Method: `PLACER_METHOD=learning` — added top-10% congestion penalty, adaptive 
 
 Beat SA baseline on 15/17. Beat RePlAce on 1/17.
 **Main weakness: congestion (2.0-2.9 on most benchmarks). WL is excellent.**
-
-## 2026-04-03 — Heavy SA polish (GNN 60 + refine 200 + SA 100K, 1 start)
-Method: `PLACER_METHOD=learning` — SA t_start=0.12, more SA iters, fewer GNN/refine epochs
-- ibm01: proxy=1.2707 (wl=0.067 den=1.046 cong=1.360) 9.12s
 
 ## 2026-04-04 — Full suite rerun (`--no-media`)
 Method: `PLACER_METHOD=learning` — current code, benchmark sweep without visualization output

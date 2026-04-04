@@ -11,8 +11,8 @@ This graph summarizes the full-suite benchmark sections logged in the notes.
 
 | Run ID | Method | Date | Scope | Plotted Proxy | Benchmarks Logged |
 |--------|--------|------|-------|---------------|-------------------|
-| L4 | Learning Placer | 2026-04-03 | full_suite | 1.7117 | 17 |
-| L6 | Learning Placer | 2026-04-04 | full_suite | 1.7060 | 17 |
+| L1 | Learning Placer | 2026-04-03 | full_suite | 1.7117 | 17 |
+| L2 | Learning Placer | 2026-04-04 | full_suite | 1.7060 | 17 |
 | S1 | SA Placer | 2026-04-03 | full_suite | 1.5765 | 17 |
 | S2 | SA Placer | 2026-04-04 | full_suite | 1.4850 | 17 |
 | A1 | Analytical Placer | 2026-04-03 | full_suite | 1.7310 | 17 |
