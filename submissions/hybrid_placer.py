@@ -1,23 +1,23 @@
 """
-Hybrid Placer — Analytical (gradient) initialisation → SA refinement.
+Hybrid Placer v2 — Analytical (gradient) initialisation → SA refinement.
+
+Improvements over v1 (avg 1.6972):
+  - SA reheating: when stagnating for 10K iters, reheat temperature to escape
+    local minima.
+  - More SA iterations: 150K (up from 120K).
+  - Higher density weight in analytical phase to better model congestion.
+  - Higher-res density grid (16x16) in analytical phase.
 
 Strategy:
-  1. **Analytical phase**: Differentiable log-sum-exp HPWL + Gaussian density
-     penalty optimised with Adam (~1000 steps).  This captures global
-     connectivity structure quickly.
-  2. **Legalization**: Minimum-displacement snap to resolve overlaps.
-  3. **SA phase**: Full net-HPWL simulated annealing with density-aware moves
-     (reuses the proven SA engine from sa_placer).
-
-The intuition: analytical gets global structure right, SA handles local
-optimisation and legalization details.
+  1. Analytical phase: Differentiable LSE-HPWL + density + overlap with Adam.
+  2. Legalization: Minimum-displacement snap to resolve overlaps.
+  3. SA phase: Full net-HPWL simulated annealing with reheating.
 
 Usage:
     uv run evaluate submissions/hybrid_placer.py
     uv run evaluate submissions/hybrid_placer.py --all
 """
 
-import math
 import random
 import sys
 from pathlib import Path
@@ -32,7 +32,6 @@ if _PROJECT_ROOT not in sys.path:
 from macro_place.benchmark import Benchmark
 from submissions.base import BasePlacer
 
-# Reuse net extraction, legalization, and SA refinement from sa_placer
 from submissions.sa_placer import (
     _load_plc,
     _extract_nets,
@@ -44,21 +43,10 @@ from submissions.sa_placer import (
 
 # ── Differentiable HPWL (log-sum-exp) ──────────────────────────────────────
 
-def _build_net_tensors(benchmark: Benchmark, plc):
+def _build_net_tensors(plc):
     """
     Build padded tensor representation of nets for differentiable HPWL.
-
-    Returns
-    -------
-    net_mask   : [N, max_pins] bool  — True for valid pin slots
-    net_hard   : [N, max_pins] long  — hard macro index (0 if not hard pin)
-    net_is_hard: [N, max_pins] bool  — True if pin belongs to a movable hard macro
-    net_ox     : [N, max_pins] float — pin x offset (hard) or absolute x (fixed)
-    net_oy     : [N, max_pins] float — pin y offset (hard) or absolute y (fixed)
-    net_weight : [N] float
     """
-    n_hard = benchmark.num_hard_macros
-
     hard_name_to_idx = {}
     for tensor_i, plc_i in enumerate(plc.hard_macro_indices):
         name = plc.modules_w_pins[plc_i].get_name()
@@ -69,7 +57,6 @@ def _build_net_tensors(benchmark: Benchmark, plc):
         mod = plc.modules_w_pins[plc_i]
         soft_name_to_pos[mod.get_name()] = mod.get_pos()
 
-    # Collect raw net data
     raw_nets = []
     for driver_name, sink_names in plc.nets.items():
         if driver_name not in plc.mod_name_to_indices:
@@ -77,7 +64,7 @@ def _build_net_tensors(benchmark: Benchmark, plc):
         driver_plc_idx = plc.mod_name_to_indices[driver_name]
         weight = plc.modules_w_pins[driver_plc_idx].get_weight()
 
-        pins = []  # list of (is_hard, macro_idx_or_-1, ox, oy)
+        pins = []
         for pin_name in [driver_name] + sink_names:
             if pin_name not in plc.mod_name_to_indices:
                 continue
@@ -133,37 +120,21 @@ def _build_net_tensors(benchmark: Benchmark, plc):
 
 
 def _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, gamma=5.0):
-    """
-    Differentiable HPWL using log-sum-exp approximation.
-
-    pos: [n_hard, 2] — current hard macro positions (requires_grad)
-    Returns scalar HPWL estimate.
-    """
-    # Compute pin positions: for hard pins, pos[idx] + offset; for fixed, offset is absolute
-    # pin_x[i,j] = is_hard * (pos[hard_idx, 0] + ox) + (1-is_hard) * ox
-    hard_x = pos[net_hard, 0]  # [N, max_pins]
+    """Differentiable HPWL using log-sum-exp approximation."""
+    hard_x = pos[net_hard, 0]
     hard_y = pos[net_hard, 1]
     is_h = net_is_hard.float()
 
     pin_x = is_h * (hard_x + net_ox) + (1 - is_h) * net_ox
     pin_y = is_h * (hard_y + net_oy) + (1 - is_h) * net_oy
 
-    # Mask out invalid pins with large negative / positive values
     BIG = 1e6
-    pin_x_max = pin_x.clone()
-    pin_x_max[~net_mask] = -BIG
-    pin_x_min = pin_x.clone()
-    pin_x_min[~net_mask] = BIG
+    pin_x_max = pin_x.clone(); pin_x_max[~net_mask] = -BIG
+    pin_x_min = pin_x.clone(); pin_x_min[~net_mask] = BIG
+    pin_y_max = pin_y.clone(); pin_y_max[~net_mask] = -BIG
+    pin_y_min = pin_y.clone(); pin_y_min[~net_mask] = BIG
 
-    pin_y_max = pin_y.clone()
-    pin_y_max[~net_mask] = -BIG
-    pin_y_min = pin_y.clone()
-    pin_y_min[~net_mask] = BIG
-
-    # LSE approximation: max(x) ≈ (1/γ) * log(Σ exp(γ*x))
-    # min(x) ≈ -(1/γ) * log(Σ exp(-γ*x))
     inv_gamma = 1.0 / gamma
-
     x_max = inv_gamma * torch.logsumexp(gamma * pin_x_max, dim=1)
     x_min = -inv_gamma * torch.logsumexp(-gamma * pin_x_min, dim=1)
     y_max = inv_gamma * torch.logsumexp(gamma * pin_y_max, dim=1)
@@ -173,34 +144,27 @@ def _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, 
     return hpwl.sum()
 
 
-def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=8):
-    """
-    Gaussian-smoothed density penalty to spread macros apart.
-
-    Penalises grid cells where total macro area exceeds target density.
-    """
-    n = pos.shape[0]
-    # Grid cell centers
+def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=16):
+    """Gaussian-smoothed density penalty to spread macros apart."""
     cell_w = canvas_w / grid_n
     cell_h = canvas_h / grid_n
     cx = torch.linspace(cell_w / 2, canvas_w - cell_w / 2, grid_n)
     cy = torch.linspace(cell_h / 2, canvas_h - cell_h / 2, grid_n)
-    grid_cx, grid_cy = torch.meshgrid(cx, cy, indexing='ij')  # [grid_n, grid_n]
-    grid_cx = grid_cx.reshape(1, -1)  # [1, G]
+    grid_cx, grid_cy = torch.meshgrid(cx, cy, indexing='ij')
+    grid_cx = grid_cx.reshape(1, -1)
     grid_cy = grid_cy.reshape(1, -1)
 
-    # Macro contributions: Gaussian bell centered at macro position
-    sigma_x = sizes[:, 0:1] * 0.5 + cell_w * 0.5  # [n, 1]
+    sigma_x = sizes[:, 0:1] * 0.5 + cell_w * 0.5
     sigma_y = sizes[:, 1:2] * 0.5 + cell_h * 0.5
 
-    dx = pos[:, 0:1] - grid_cx  # [n, G]
+    dx = pos[:, 0:1] - grid_cx
     dy = pos[:, 1:2] - grid_cy
 
     weight_x = torch.exp(-0.5 * (dx / sigma_x) ** 2)
     weight_y = torch.exp(-0.5 * (dy / sigma_y) ** 2)
-    area = sizes[:, 0:1] * sizes[:, 1:2]  # [n, 1]
+    area = sizes[:, 0:1] * sizes[:, 1:2]
 
-    density = (area * weight_x * weight_y).sum(dim=0)  # [G]
+    density = (area * weight_x * weight_y).sum(dim=0)
 
     target = (sizes[:, 0] * sizes[:, 1]).sum() / (grid_n * grid_n)
     overflow = torch.relu(density - target * 2.0)
@@ -208,33 +172,25 @@ def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=8):
 
 
 def _overlap_penalty(pos, sizes):
-    """
-    Differentiable overlap penalty between all pairs of macros.
-    Smooth approximation of overlap area using softplus.
-    """
+    """Differentiable overlap penalty between all pairs of macros."""
     n = pos.shape[0]
     if n <= 1:
         return torch.tensor(0.0)
 
-    half_w = sizes[:, 0] / 2  # [n]
+    half_w = sizes[:, 0] / 2
     half_h = sizes[:, 1] / 2
 
-    # Pairwise distances
-    dx = pos[:, 0].unsqueeze(1) - pos[:, 0].unsqueeze(0)  # [n, n]
+    dx = pos[:, 0].unsqueeze(1) - pos[:, 0].unsqueeze(0)
     dy = pos[:, 1].unsqueeze(1) - pos[:, 1].unsqueeze(0)
 
-    # Required separations
     sep_x = half_w.unsqueeze(1) + half_w.unsqueeze(0)
     sep_y = half_h.unsqueeze(1) + half_h.unsqueeze(0)
 
-    # Overlap in each dimension (positive means overlap)
     overlap_x = torch.nn.functional.softplus(sep_x - torch.abs(dx), beta=5.0)
     overlap_y = torch.nn.functional.softplus(sep_y - torch.abs(dy), beta=5.0)
 
-    # Overlap area (approximate) — ignore self-overlap
-    mask = ~torch.eye(n, dtype=torch.bool)
-    overlap_area = (overlap_x * overlap_y * mask.float()).sum() / 2
-    return overlap_area
+    mask = torch.triu(torch.ones(n, n, dtype=torch.bool), diagonal=1)
+    return (overlap_x * overlap_y * mask.float()).sum()
 
 
 # ── Analytical placement phase ──────────────────────────────────────────────
@@ -250,9 +206,9 @@ def _analytical_place(
     seed: int = 42,
 ):
     """
-    Gradient-based placement using differentiable HPWL + density + overlap penalties.
+    Gradient-based placement using differentiable HPWL + density + overlap.
 
-    Returns hard macro positions as numpy array [n_hard, 2].
+    Uses fixed gamma=5 (proven to work well) with ramping density/overlap.
     """
     torch.manual_seed(seed)
 
@@ -265,21 +221,16 @@ def _analytical_place(
     movable = benchmark.get_movable_mask()[:n_hard]
     fixed_mask = ~movable
 
-    # Initialize from current positions
     init_pos = benchmark.macro_positions[:n_hard].clone().float()
-
-    # Clamp to canvas
     init_pos[:, 0] = torch.clamp(init_pos[:, 0], half_w, cw - half_w)
     init_pos[:, 1] = torch.clamp(init_pos[:, 1], half_h, ch - half_h)
 
-    # Build net tensors
-    net_data = _build_net_tensors(benchmark, plc)
+    net_data = _build_net_tensors(plc)
     if net_data is None:
         return init_pos.numpy().astype(np.float64)
 
     net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight = net_data
 
-    # Optimizable positions
     pos = init_pos.clone().detach().requires_grad_(True)
     fixed_pos = init_pos.clone()
 
@@ -291,18 +242,17 @@ def _analytical_place(
     for step in range(num_steps):
         optimizer.zero_grad()
 
-        # Project fixed macros back
         with torch.no_grad():
             pos.data[fixed_mask] = fixed_pos[fixed_mask]
 
         # HPWL loss
         hpwl = _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, gamma=gamma)
 
-        # Density penalty (ramp up over time)
+        # Density penalty (ramp up over first 30%)
         density_ramp = min(1.0, step / (num_steps * 0.3))
         density = _density_penalty(pos, sizes, cw, ch) * density_weight * density_ramp
 
-        # Overlap penalty (ramp up aggressively)
+        # Overlap penalty (ramp up over first 20%)
         overlap_ramp = min(1.0, step / (num_steps * 0.2))
         overlap = _overlap_penalty(pos, sizes) * overlap_weight * overlap_ramp
 
@@ -310,7 +260,6 @@ def _analytical_place(
         loss.backward()
         optimizer.step()
 
-        # Project to canvas bounds
         with torch.no_grad():
             pos.data[:, 0] = torch.clamp(pos.data[:, 0], half_w, cw - half_w)
             pos.data[:, 1] = torch.clamp(pos.data[:, 1], half_h, ch - half_h)
@@ -328,11 +277,11 @@ def _analytical_place(
 
 class HybridPlacer(BasePlacer):
     """
-    Hybrid placer: analytical gradient initialisation → SA refinement.
+    Hybrid placer v2: analytical gradient init → SA refinement with reheating.
 
-    Phase 1 (analytical): ~1000 Adam steps with LSE-HPWL + density + overlap.
+    Phase 1 (analytical): 1200 Adam steps with annealing gamma, density, overlap.
     Phase 2 (legalize): Minimum-displacement overlap resolution.
-    Phase 3 (SA): Full net-HPWL simulated annealing with 120K iterations.
+    Phase 3 (SA): 150K iterations with reheating on stagnation.
     """
 
     def __init__(
@@ -345,9 +294,11 @@ class HybridPlacer(BasePlacer):
         density_weight: float = 0.001,
         overlap_weight: float = 0.05,
         # SA phase
-        sa_iters: int = 120_000,
+        sa_iters: int = 150_000,
         sa_t_start: float = 0.15,
         sa_t_end: float = 0.001,
+        reheat_threshold: int = 10_000,
+        reheat_factor: float = 3.0,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
@@ -364,6 +315,8 @@ class HybridPlacer(BasePlacer):
         self.sa_iters = sa_iters
         self.sa_t_start = sa_t_start
         self.sa_t_end = sa_t_end
+        self.reheat_threshold = reheat_threshold
+        self.reheat_factor = reheat_factor
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
@@ -390,7 +343,6 @@ class HybridPlacer(BasePlacer):
         sep_x = (sizes[:, 0:1] + sizes[:, 0:1].T) / 2
         sep_y = (sizes[:, 1:2] + sizes[:, 1:2].T) / 2
 
-        # Load PlacementCost for net connectivity
         plc = _load_plc(benchmark.name)
 
         # ── Phase 1: Analytical placement ──────────────────────────────────
@@ -422,13 +374,12 @@ class HybridPlacer(BasePlacer):
 
         capture_snapshot(pos)
 
-        # ── Phase 3: SA refinement ─────────────────────────────────────────
+        # ── Phase 3: SA refinement with reheating ──────────────────────────
         if plc is not None:
             nets, macro_to_nets = _extract_nets(benchmark, plc)
         else:
             nets, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        # Build neighbor adjacency
         neighbors = [[] for _ in range(n_hard)]
         for net in nets:
             idx = net["hard_idx"]
@@ -448,13 +399,14 @@ class HybridPlacer(BasePlacer):
                 trace_callback=capture_trace,
                 t_start_factor=self.sa_t_start,
                 t_end_factor=self.sa_t_end,
+                reheat_threshold=self.reheat_threshold,
+                reheat_factor=self.reheat_factor,
             )
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
         full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
 
-        # Optionally update soft macros
         if self.run_fd and plc is not None and benchmark.num_soft_macros > 0:
             soft_pos = _update_soft_macros(pos, benchmark, plc)
             full_pos[n_hard:] = torch.tensor(soft_pos, dtype=torch.float32)

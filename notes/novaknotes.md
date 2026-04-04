@@ -53,7 +53,7 @@ Total runtime: **1492.67s** (~25 min for all 17 benchmarks)
 | ibm18     | 1.8320 | 0.053 |   1.111 |      2.447 |      2.7755 |  1.7722 | +34.0% |      -3.4% |   62s |
 | **AVG**   | **1.6972** | —  |       — |          — | **2.1251**  | **1.4578** | **+20.1%** | **-16.4%** | — |
 
-## Summary
+## Summary (v1)
 
 - **Average proxy cost: 1.6972** (all 17 IBM benchmarks)
 - **Beats SA baseline** (2.1251) by **20.1%** on average — beats SA on **15 of 17** benchmarks
@@ -62,21 +62,61 @@ Total runtime: **1492.67s** (~25 min for all 17 benchmarks)
 - Main gap vs RePlAce is in **congestion** — analytical spreading helps but not enough
 - Zero overlaps on all benchmarks
 
+---
+
+## v2 Results (2026-04-04) — SA Reheating + 150K iters + 16x16 density grid
+
+Changes from v1:
+- SA reheating (reheat after 10K stagnant iters, 3x temperature boost)
+- 150K SA iterations (up from 120K)
+- 16x16 density grid in analytical phase (up from 8x8)
+- Analytical phase unchanged (gamma=5, 1000 steps, lr=0.5)
+
+| Benchmark |  v1 Proxy |  v2 Proxy | Change |
+|-----------|-----------|-----------|--------|
+| ibm01     |    1.2458 |    1.2686 |  +1.8% |
+| ibm02     |    1.7708 |    1.7673 |  -0.2% |
+| ibm03     |    1.7771 |    1.7794 |  +0.1% |
+| ibm04     |    1.6132 |    1.6172 |  +0.2% |
+| ibm06     |    2.0241 |    2.0451 |  +1.0% |
+| ibm07     |    1.6769 |    1.6875 |  +0.6% |
+| ibm08     |    1.8352 |    1.8351 |   0.0% |
+| ibm09     |    1.2520 |    1.2523 |   0.0% |
+| ibm10     |    1.6931 |    1.6915 |  -0.1% |
+| ibm11     |    1.4224 |    1.4263 |  +0.3% |
+| ibm12     |    1.9868 |    2.0034 |  +0.8% |
+| ibm13     |    1.6506 |    1.6454 |  -0.3% |
+| ibm14     |    1.7277 |    1.7243 |  -0.2% |
+| ibm15     |    1.8122 |    1.8156 |  +0.2% |
+| ibm16     |    1.7517 |    1.7554 |  +0.2% |
+| ibm17     |    1.7813 |    1.7799 |  -0.1% |
+| ibm18     |    1.8320 |    1.8325 |   0.0% |
+| **AVG**   | **1.6972**| **1.7016**|  +0.3% |
+
+**Conclusion**: v2 is essentially identical to v1 (+0.3%). SA reheating, more iterations,
+and finer density grid did not meaningfully improve results. The bottleneck is **congestion**,
+not HPWL optimization or local minima trapping.
+
+Also tested and rejected:
+- Gamma annealing (50→5): worse on ibm01 (1.30 vs 1.25), no improvement elsewhere
+- Higher LR (5.0): overshoots, worse convergence
+- Multi-start SA (2 runs): 2x slower, negligible improvement
+- run_fd=True (soft macro FD): 24 min per benchmark, worse congestion
+- analytical_placer.py's _build_net_tensors: different fixed-pin treatment, marginally worse
+
 ## Leaderboard Position
 
 | Rank | Method | Avg Proxy |
 |------|--------|-----------|
 | 1 | RePlAce (baseline) | 1.4578 |
-| 2 | **HybridPlacer (ours)** | **1.6972** |
-| 3 | Will (Partcl) | 1.5338 |
+| 2 | Will (Partcl) | 1.5338 |
+| 3 | **HybridPlacer (ours)** | **1.6972** |
 | 4 | SA (baseline) | 2.1251 |
 
-Currently 3rd place — behind RePlAce and Will's seed placer (1.5338).
+## Key Insight
 
-## Next Steps / Ideas to Improve
-- Increase SA iterations (try 200K-500K) — more iterations should help close the gap
-- Tune analytical phase: higher density_weight to reduce congestion penalty
-- Add congestion-aware term to the analytical cost function
-- Try force-directed soft macro update (run_fd=True) to improve soft macro positions
-- Multi-start: run analytical phase with different random seeds, pick best for SA
-- Density-aware SA moves: penalize moves that increase local density during SA
+The gap to RePlAce (~16%) is almost entirely in **congestion** (avg 2.25 vs ~1.5).
+Our wirelength is already very competitive. To close the gap, we need:
+- A congestion-aware objective (not just HPWL + density)
+- Better cell-aware spreading that models routing tracks
+- Possibly a completely different approach for congestion (e.g., routing-driven placement)
