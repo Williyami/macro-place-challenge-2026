@@ -155,65 +155,76 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
 def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(Hybrid method)novaknotes.md"
     text = path.read_text()
-    lines = text.splitlines()
+    runs: list[RunRecord] = []
+    rows: list[dict[str, object]] = []
+    sections = re.split(r"(?=^## Benchmark Results \()", text, flags=re.M)
+    hybrid_count = 0
 
-    date_match = re.search(r"## Benchmark Results \(([^)]+)\)", text)
-    date = date_match.group(1) if date_match else ""
-    runtime_match = re.search(r"Total runtime:\s+\*\*([0-9.]+)s", text)
-    total_runtime_s = float(runtime_match.group(1)) if runtime_match else None
+    for section in sections:
+        if not section.startswith("## Benchmark Results ("):
+            continue
+        hybrid_count += 1
+        run_id = f"H{hybrid_count}"
+        date_match = re.match(r"## Benchmark Results \(([^)]+)\)", section)
+        date = date_match.group(1) if date_match else ""
+        runtime_match = re.search(r"Total runtime:\s+\*\*([0-9.]+)s", section)
+        total_runtime_s = float(runtime_match.group(1)) if runtime_match else None
 
-    benchmarks: list[BenchmarkRow] = []
-    for line in lines:
-        if not line.startswith("|"):
-            continue
-        parts = [part.strip() for part in line.strip().strip("|").split("|")]
-        if len(parts) < 10:
-            continue
-        if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
-            continue
-        if not re.fullmatch(r"ibm\d+", parts[0]):
-            continue
-        benchmarks.append(
-            BenchmarkRow(
-                benchmark=parts[0],
-                proxy=float(parts[1]),
-                wl=float(parts[2]),
-                density=float(parts[3]),
-                congestion=float(parts[4]),
-                time_s=parse_time_seconds(parts[9]),
+        benchmarks: list[BenchmarkRow] = []
+        for line in section.splitlines():
+            if not line.startswith("|"):
+                continue
+            parts = [part.strip() for part in line.strip().strip("|").split("|")]
+            if len(parts) < 10:
+                continue
+            if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
+                continue
+            if not re.fullmatch(r"ibm\d+", parts[0]):
+                continue
+            benchmarks.append(
+                BenchmarkRow(
+                    benchmark=parts[0],
+                    proxy=float(parts[1]),
+                    wl=float(parts[2]),
+                    density=float(parts[3]),
+                    congestion=float(parts[4]),
+                    time_s=parse_time_seconds(parts[9]),
+                )
+            )
+
+        avg_match = re.search(r"^\|\s*\*\*AVG\*\*\s*\|\s*\*\*([0-9.]+)\*\*", section, flags=re.M)
+        full_suite_avg = float(avg_match.group(1)) if avg_match else None
+        runs.append(
+            RunRecord(
+                run_id=run_id,
+                method="HybridPlacer",
+                date=date,
+                title="Analytical -> SA pipeline benchmark run",
+                scope="full_suite",
+                benchmarks_logged=len(benchmarks),
+                plotted_proxy=full_suite_avg if full_suite_avg is not None else mean(b.proxy for b in benchmarks),
+                full_suite_avg_proxy=full_suite_avg,
+                total_runtime_s=total_runtime_s,
+                source_file=path.name,
+                source_heading="Benchmark Results",
             )
         )
+        for benchmark in benchmarks:
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "method": "HybridPlacer",
+                    "benchmark": benchmark.benchmark,
+                    "proxy": benchmark.proxy,
+                    "wl": benchmark.wl,
+                    "density": benchmark.density,
+                    "congestion": benchmark.congestion,
+                    "time_s": benchmark.time_s,
+                    "source_file": path.name,
+                }
+            )
 
-    avg_match = re.search(r"^\|\s*\*\*AVG\*\*\s*\|\s*\*\*([0-9.]+)\*\*", text, flags=re.M)
-    full_suite_avg = float(avg_match.group(1)) if avg_match else None
-    run = RunRecord(
-        run_id="H1",
-        method="HybridPlacer",
-        date=date,
-        title="Analytical -> SA pipeline benchmark run",
-        scope="full_suite",
-        benchmarks_logged=len(benchmarks),
-        plotted_proxy=full_suite_avg if full_suite_avg is not None else mean(b.proxy for b in benchmarks),
-        full_suite_avg_proxy=full_suite_avg,
-        total_runtime_s=total_runtime_s,
-        source_file=path.name,
-        source_heading="Benchmark Results",
-    )
-    rows = [
-        {
-            "run_id": "H1",
-            "method": "HybridPlacer",
-            "benchmark": benchmark.benchmark,
-            "proxy": benchmark.proxy,
-            "wl": benchmark.wl,
-            "density": benchmark.density,
-            "congestion": benchmark.congestion,
-            "time_s": benchmark.time_s,
-            "source_file": path.name,
-        }
-        for benchmark in benchmarks
-    ]
-    return [run], rows
+    return runs, rows
 
 
 def parse_sa_analytical() -> tuple[list[RunRecord], list[dict[str, object]]]:
