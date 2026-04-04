@@ -8,6 +8,7 @@ Generated from the note files in this directory.
 |--------|--------|------|-------|-------|-------------------|---------------|----------------------|-------------------|--------|
 | L1 | Learning Placer | 2026-04-03 | Stronger density + congestion proxy + target_util=0.6 | full_suite | 17 | 1.7117 | 1.7117 | 170.83 | (RL method)eklundnotes.md |
 | L2 | Learning Placer | 2026-04-04 | Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
+| L3 | Learning Placer | 2026-04-04 | v2: Pre-trained GNN + Density-aware SA + Greedy Flipping | full_suite | 17 | 1.6282 | 1.6282 | 84.55 | (RL method)eklundnotes.md |
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
@@ -54,6 +55,23 @@ Generated from the note files in this directory.
 | L2 | Learning Placer | ibm16 | 1.7527 | 0.048 | 1.066 | 2.343 | 20.48 | (RL method)eklundnotes.md |
 | L2 | Learning Placer | ibm17 | 1.7912 | 0.053 | 1.010 | 2.468 | 30.82 | (RL method)eklundnotes.md |
 | L2 | Learning Placer | ibm18 | 1.8331 | 0.053 | 1.112 | 2.448 | 14.08 | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm01 | 1.1795 | 0.069 | 0.890 | 1.330 | 84.55 | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm02 | 1.6912 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm03 | 1.7467 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm04 | 1.4569 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm06 | 1.8393 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm07 | 1.6561 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm08 | 1.6987 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm09 | 1.1960 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm10 | 1.6763 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm11 | 1.3852 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm12 | 1.9648 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm13 | 1.5334 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm14 | 1.6263 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm15 | 1.7841 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm16 | 1.6803 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm17 | 1.7660 | - | - | - | - | (RL method)eklundnotes.md |
+| L3 | Learning Placer | ibm18 | 1.7985 | - | - | - | - | (RL method)eklundnotes.md |
 | S1 | SA Placer | ibm01 | 1.2923 | 0.067 | 1.070 | 1.381 | 12.50 | (SA + Analytical method) Omnellnotes.md |
 | S1 | SA Placer | ibm02 | 1.7310 | 0.075 | 0.901 | 2.411 | 7.32 | (SA + Analytical method) Omnellnotes.md |
 | S1 | SA Placer | ibm03 | 1.4484 | 0.078 | 0.895 | 1.846 | 7.54 | (SA + Analytical method) Omnellnotes.md |

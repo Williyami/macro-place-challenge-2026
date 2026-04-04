@@ -45,6 +45,13 @@ def parse_time_seconds(text: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
+def _safe_float(s: str) -> float | None:
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
     text = path.read_text()
@@ -104,9 +111,9 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
                     BenchmarkRow(
                         benchmark=parts[0],
                         proxy=float(parts[1]),
-                        wl=float(parts[2]),
-                        density=float(parts[3]),
-                        congestion=float(parts[4]),
+                        wl=_safe_float(parts[2]),
+                        density=_safe_float(parts[3]),
+                        congestion=_safe_float(parts[4]),
                         time_s=parse_time_seconds(parts[5]),
                     )
                 )
@@ -271,9 +278,9 @@ def parse_sa_analytical() -> tuple[list[RunRecord], list[dict[str, object]]]:
                     BenchmarkRow(
                         benchmark=parts[0],
                         proxy=float(parts[1]),
-                        wl=float(parts[2]),
-                        density=float(parts[3]),
-                        congestion=float(parts[4]),
+                        wl=_safe_float(parts[2]),
+                        density=_safe_float(parts[3]),
+                        congestion=_safe_float(parts[4]),
                         time_s=parse_time_seconds(parts[5]),
                     )
                 )

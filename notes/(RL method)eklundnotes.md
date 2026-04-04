@@ -55,3 +55,40 @@ Method: `PLACER_METHOD=learning` — current code, benchmark sweep without visua
 
 Beat SA baseline on 15/17. Beat RePlAce on 1/17.
 **This rerun is slightly better than the 2026-04-03 full-suite average (1.7117 -> 1.7060).**
+
+## 2026-04-04 — v2: Pre-trained GNN + Density-aware SA + Greedy Flipping
+
+Changes:
+- Pre-trained GNN across all 17 IBM benchmarks (128 hidden, 4 layers, gated residual, 5 rounds)
+- 9-dim node features (added aspect ratio, weighted degree)
+- Fine-tune GNN per instance (100 epochs) instead of training from scratch (60 epochs)
+- Density-aware SA polish (same as SA placer improvements)
+- Greedy macro flipping post-processing
+- 3 multi-starts with best selection
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.1795 | 0.069 | 0.890 | 1.330 | 84.55s | BETTER (1.3166) |
+| ibm02 | 1.6912 | — | — | — | — | BETTER (1.9072) |
+| ibm03 | 1.7467 | — | — | — | — | WORSE (1.7401) |
+| ibm04 | 1.4569 | — | — | — | — | BETTER (1.5037) |
+| ibm06 | 1.8393 | — | — | — | — | BETTER (2.5057) |
+| ibm07 | 1.6561 | — | — | — | — | BETTER (2.0229) |
+| ibm08 | 1.6987 | — | — | — | — | BETTER (1.9239) |
+| ibm09 | 1.1960 | — | — | — | — | BETTER (1.3875) |
+| ibm10 | 1.6763 | — | — | — | — | BETTER (2.1108) |
+| ibm11 | 1.3852 | — | — | — | — | BETTER (1.7111) |
+| ibm12 | 1.9648 | — | — | — | — | BETTER (2.8261) |
+| ibm13 | 1.5334 | — | — | — | — | BETTER (1.9141) |
+| ibm14 | 1.6263 | — | — | — | — | BETTER (2.2750) |
+| ibm15 | 1.7841 | — | — | — | — | BETTER (2.3000) |
+| ibm16 | 1.6803 | — | — | — | — | BETTER (2.2337) |
+| ibm17 | 1.7660 | — | — | — | — | BETTER (3.6726) |
+| ibm18 | 1.7985 | — | — | — | — | BETTER (2.7755) |
+| **AVG** | **1.6282** | | | | 2000.80s | **SA: 2.1251** |
+
+Beat SA baseline on 15/17. Beat RePlAce on 0/17.
+**Major improvement: 1.7060 -> 1.6282 (-4.6%).**
+Pre-trained GNN + density SA polish + flipping all contributed.
+Still behind SA placer (1.4803) — the GNN initial placement helps but SA from initial.plc converges better.
