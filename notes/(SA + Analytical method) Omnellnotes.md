@@ -83,3 +83,82 @@ Samla research papers till claude
 - SA is our best method (avg 1.58), but ibm04 congestion remains problematic
 - Analytical placer works but needs tuning — congestion is high across the board
 - Potential improvements: use analytical as initial placement for SA (hybrid), tune density/congestion weights, increase analytical iters
+
+## Benchmark Results (2026-04-04)
+
+### SA Placer (PLACER_METHOD=sa)
+
+**Method:** Simulated Annealing with full net-HPWL cost.
+- Current code in `submissions/sa_placer.py`
+- Benchmark sweep run with `--no-media` to avoid visualization overhead
+
+| Benchmark | proxy  | wl    | den   | cong  | Time   |
+|-----------|--------|-------|-------|-------|--------|
+| ibm01     | 1.1362 | 0.069 | 0.827 | 1.307 | 43.79s |
+| ibm02     | 1.5992 | 0.076 | 0.728 | 2.319 | 24.71s |
+| ibm03     | 1.3975 | 0.079 | 0.771 | 1.865 | 35.23s |
+| ibm04     | 1.3680 | 0.072 | 0.779 | 1.814 | 132.07s |
+| ibm06     | 1.7328 | 0.063 | 0.764 | 2.576 | 35.86s |
+| ibm07     | 1.4800 | 0.065 | 0.808 | 2.022 | 49.05s |
+| ibm08     | 1.5224 | 0.070 | 0.840 | 2.066 | 45.89s |
+| ibm09     | 1.1079 | 0.058 | 0.820 | 1.281 | 39.97s |
+| ibm10     | 1.3624 | 0.065 | 0.707 | 1.889 | 81.26s |
+| ibm11     | 1.2394 | 0.055 | 0.847 | 1.521 | 45.97s |
+| ibm12     | 1.6420 | 0.061 | 0.750 | 2.412 | 77.21s |
+| ibm13     | 1.3908 | 0.054 | 0.875 | 1.799 | 37.38s |
+| ibm14     | 1.5988 | 0.051 | 0.948 | 2.146 | 91.98s |
+| ibm15     | 1.5994 | 0.058 | 0.917 | 2.165 | 64.54s |
+| ibm16     | 1.5308 | 0.048 | 0.848 | 2.116 | 70.92s |
+| ibm17     | 1.7504 | 0.053 | 0.941 | 2.454 | 84.36s |
+| ibm18     | 1.7875 | 0.053 | 1.034 | 2.435 | 39.19s |
+| **AVG**   |**1.4850**|     |       |       | 999.38s |
+
+- +30.1% better than SA baseline (2.1251)
+- -1.9% worse than RePlAce (1.4578)
+- Massive improvement over the previous logged SA run (1.5765 -> 1.4850)
+
+### Analytical Placer (PLACER_METHOD=analytical)
+
+**Method:** Differentiable placement with Adam optimizer.
+- Current code in `submissions/analytical_placer.py`
+- Benchmark sweep run with `--no-media` to avoid visualization overhead
+
+| Benchmark | proxy  | wl    | den   | cong  | Time    |
+|-----------|--------|-------|-------|-------|---------|
+| ibm01     | 1.3845 | 0.103 | 1.017 | 1.546 | 16.87s |
+| ibm02     | 1.7839 | 0.089 | 0.920 | 2.470 | 14.58s |
+| ibm03     | 1.6980 | 0.095 | 1.054 | 2.152 | 15.07s |
+| ibm04     | 1.6156 | 0.084 | 1.015 | 2.048 | 25.28s |
+| ibm06     | 1.9669 | 0.071 | 0.989 | 2.803 | 18.40s |
+| ibm07     | 1.7728 | 0.074 | 1.060 | 2.338 | 19.57s |
+| ibm08     | 1.8769 | 0.076 | 1.121 | 2.482 | 28.42s |
+| ibm09     | 1.3438 | 0.063 | 1.052 | 1.509 | 12.22s |
+| ibm10     | 1.7747 | 0.066 | 1.025 | 2.393 | 108.72s |
+| ibm11     | 1.5111 | 0.061 | 1.133 | 1.768 | 26.81s |
+| ibm12     | 2.0684 | 0.068 | 1.076 | 2.926 | 49.58s |
+| ibm13     | 1.7159 | 0.060 | 1.130 | 2.182 | 24.60s |
+| ibm14     | 1.7998 | 0.055 | 1.103 | 2.387 | 113.30s |
+| ibm15     | 1.8600 | 0.061 | 1.133 | 2.465 | 22.30s |
+| ibm16     | 1.7438 | 0.051 | 1.044 | 2.342 | 47.24s |
+| ibm17     | 1.8249 | 0.056 | 1.014 | 2.524 | 47.09s |
+| ibm18     | 1.8287 | 0.055 | 1.097 | 2.451 | 8.65s |
+| **AVG**   |**1.7394**|     |       |       | 598.68s |
+
+- +18.1% better than SA baseline (2.1251)
+- -19.3% worse than RePlAce (1.4578)
+- Slight regression versus the previous logged analytical run (1.7310 -> 1.7394)
+
+### Comparison Summary
+
+| Method     | Avg Proxy | vs SA Baseline | vs RePlAce |
+|------------|-----------|----------------|------------|
+| SA baseline| 2.1251    | —              | +45.8%     |
+| **SA ours**| **1.4850**| **-30.1%**     | +1.9%      |
+| Analytical | 1.7394    | -18.1%         | +19.3%     |
+| will_seed  | 1.5338    | -27.8%         | +5.2%      |
+| RePlAce    | 1.4578    | -31.4%         | —          |
+
+### Observations / Next Steps
+- SA is now clearly our strongest current method and is within 1.9% of RePlAce on proxy cost
+- Analytical remains competitive but is still congestion-limited and now sits well behind the new SA run
+- The current SA run also beats Will Seed on average proxy (1.4850 vs 1.5338)

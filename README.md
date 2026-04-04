@@ -229,15 +229,23 @@ Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (l
 | 2 | "BakaBobo" (Spread+Refine) | 1.4403 | — | — | 0 | 212s/bench |  |
 | 3 | "Convex Optimization" (UWaterloo Student) | 1.4556 | — | — | 0 | 16s total |  |
 | — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — | ✅ |
-| 4 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
-| 5 | SA Placer (ours) | 1.5765 | 1.2075 | 1.8108 | 0 | 215s total |  |
+| 4 | SA Placer (ours) | 1.4850 | 1.1079 | 1.7875 | 0 | 999.38s total |  |
+| 5 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
 | 6 | HybridPlacer (ours) | 1.6972 | 1.2458 | 2.0241 | 0 | 1492.67s total |  |
-| 7 | Learning Placer (ours) | 1.7117 | 1.2429 | 2.0635 | 0 | 171.83s total |  |
-| 8 | Analytical Placer (ours) | 1.7310 | 1.3438 | 2.0331 | 0 | 406s total |  |
+| 7 | Learning Placer (ours) | 1.7060 | 1.2707 | 2.0338 | 0 | 457.74s total |  |
+| 8 | Analytical Placer (ours) | 1.7394 | 1.3438 | 2.0684 | 0 | 598.68s total |  |
 | — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — | ✅ |
 | — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | ✅ |
 
 *Submit your results to appear on the leaderboard!*
+
+## 📈 Benchmark History
+
+Benchmark-history tracking for the note sections lives in:
+- [Summary](notes/benchmark%20history/benchmark_history_summary.md)
+- [Raw data](notes/benchmark%20history/benchmark_history_raw.md)
+
+![Benchmark history summary](notes/benchmark%20history/benchmark_history_summary.png)
 
 ## 🤔 FAQ
 

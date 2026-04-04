@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 
 ROOT = Path(__file__).resolve().parent
+NOTES_ROOT = ROOT.parent
 
 
 @dataclass
@@ -45,7 +46,7 @@ def parse_time_seconds(text: str) -> float | None:
 
 
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
-    path = ROOT / "(RL method)eklundnotes.md"
+    path = NOTES_ROOT / "(RL method)eklundnotes.md"
     text = path.read_text()
     blocks = re.split(r"(?=^## )", text, flags=re.M)
 
@@ -152,7 +153,7 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
 
 
 def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
-    path = ROOT / "(Hybrid method)novaknotes.md"
+    path = NOTES_ROOT / "(Hybrid method)novaknotes.md"
     text = path.read_text()
     lines = text.splitlines()
 
@@ -216,78 +217,92 @@ def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
 
 
 def parse_sa_analytical() -> tuple[list[RunRecord], list[dict[str, object]]]:
-    path = ROOT / "(SA + Analytical method) Omnellnotes.md"
+    path = NOTES_ROOT / "(SA + Analytical method) Omnellnotes.md"
     text = path.read_text()
-    date_match = re.search(r"## Benchmark Results \(([^)]+)\)", text)
-    date = date_match.group(1) if date_match else ""
-
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
-    blocks = re.split(r"(?=^### )", text, flags=re.M)
-    for block in blocks:
-        if not block.startswith("### "):
+    sections = re.split(r"(?=^## Benchmark Results \()", text, flags=re.M)
+    sa_count = 0
+    analytical_count = 0
+
+    for section in sections:
+        if not section.startswith("## Benchmark Results ("):
             continue
-        heading = block.splitlines()[0][4:].strip()
-        if heading.startswith("SA Placer"):
-            run_id, method = "S1", "SA Placer"
-        elif heading.startswith("Analytical Placer"):
-            run_id, method = "A1", "Analytical Placer"
-        else:
-            continue
-        benchmarks: list[BenchmarkRow] = []
-        for line in block.splitlines():
-            if not line.startswith("|"):
+        date_match = re.match(r"## Benchmark Results \(([^)]+)\)", section)
+        date = date_match.group(1) if date_match else ""
+        blocks = re.split(r"(?=^### )", section, flags=re.M)
+
+        for block in blocks:
+            if not block.startswith("### "):
                 continue
-            parts = [part.strip() for part in line.strip().strip("|").split("|")]
-            if len(parts) < 6:
+            heading = block.splitlines()[0][4:].strip()
+            if heading.startswith("SA Placer"):
+                sa_count += 1
+                run_id, method = f"S{sa_count}", "SA Placer"
+            elif heading.startswith("Analytical Placer"):
+                analytical_count += 1
+                run_id, method = f"A{analytical_count}", "Analytical Placer"
+            else:
                 continue
-            if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
-                continue
-            if not re.fullmatch(r"ibm\d+", parts[0]):
-                continue
-            benchmarks.append(
-                BenchmarkRow(
-                    benchmark=parts[0],
-                    proxy=float(parts[1]),
-                    wl=float(parts[2]),
-                    density=float(parts[3]),
-                    congestion=float(parts[4]),
-                    time_s=parse_time_seconds(parts[5]),
+
+            benchmarks: list[BenchmarkRow] = []
+            for line in block.splitlines():
+                if not line.startswith("|"):
+                    continue
+                parts = [part.strip() for part in line.strip().strip("|").split("|")]
+                if len(parts) < 6:
+                    continue
+                if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
+                    continue
+                if not re.fullmatch(r"ibm\d+", parts[0]):
+                    continue
+                benchmarks.append(
+                    BenchmarkRow(
+                        benchmark=parts[0],
+                        proxy=float(parts[1]),
+                        wl=float(parts[2]),
+                        density=float(parts[3]),
+                        congestion=float(parts[4]),
+                        time_s=parse_time_seconds(parts[5]),
+                    )
+                )
+
+            avg_match = re.search(
+                r"^\|\s*\*\*AVG\*\*\s*\|\s*\*?\*?([0-9.]+)\*?\*?.*?([0-9.]+)s\s*\|?$",
+                block,
+                flags=re.M,
+            )
+            avg_proxy = float(avg_match.group(1)) if avg_match else mean(b.proxy for b in benchmarks)
+            total_runtime_s = float(avg_match.group(2)) if avg_match else None
+            runs.append(
+                RunRecord(
+                    run_id=run_id,
+                    method=method,
+                    date=date,
+                    title=heading,
+                    scope="full_suite",
+                    benchmarks_logged=len(benchmarks),
+                    plotted_proxy=avg_proxy,
+                    full_suite_avg_proxy=avg_proxy,
+                    total_runtime_s=total_runtime_s,
+                    source_file=path.name,
+                    source_heading=heading,
                 )
             )
-
-        avg_match = re.search(r"^\|\s*\*\*AVG\*\*\s*\|\s*\*\*([0-9.]+)\*\*.*?([0-9.]+)s\s*\|?$", block, flags=re.M)
-        avg_proxy = float(avg_match.group(1)) if avg_match else mean(b.proxy for b in benchmarks)
-        total_runtime_s = float(avg_match.group(2)) if avg_match else None
-        runs.append(
-            RunRecord(
-                run_id=run_id,
-                method=method,
-                date=date,
-                title=heading,
-                scope="full_suite",
-                benchmarks_logged=len(benchmarks),
-                plotted_proxy=avg_proxy,
-                full_suite_avg_proxy=avg_proxy,
-                total_runtime_s=total_runtime_s,
-                source_file=path.name,
-                source_heading=heading,
-            )
-        )
-        for benchmark in benchmarks:
-            rows.append(
-                {
-                    "run_id": run_id,
-                    "method": method,
-                    "benchmark": benchmark.benchmark,
-                    "proxy": benchmark.proxy,
-                    "wl": benchmark.wl,
-                    "density": benchmark.density,
-                    "congestion": benchmark.congestion,
-                    "time_s": benchmark.time_s,
-                    "source_file": path.name,
-                }
-            )
+            for benchmark in benchmarks:
+                rows.append(
+                    {
+                        "run_id": run_id,
+                        "method": method,
+                        "benchmark": benchmark.benchmark,
+                        "proxy": benchmark.proxy,
+                        "wl": benchmark.wl,
+                        "density": benchmark.density,
+                        "congestion": benchmark.congestion,
+                        "time_s": benchmark.time_s,
+                        "source_file": path.name,
+                    }
+                )
 
     return runs, rows
 
@@ -442,9 +457,15 @@ def main() -> None:
         runs.extend(parser_runs)
         rows.extend(parser_rows)
 
-    order = {"L1": 1, "L2": 2, "L3": 3, "L4": 4, "L5": 5, "S1": 6, "A1": 7, "H1": 8}
-    runs.sort(key=lambda run: order.get(run.run_id, 999))
-    rows.sort(key=lambda row: (order.get(str(row["run_id"]), 999), str(row["benchmark"])))
+    def run_sort_key(run_id: str) -> tuple[int, int]:
+        prefix_order = {"L": 1, "S": 2, "A": 3, "H": 4}
+        match = re.fullmatch(r"([A-Z])(\d+)", run_id)
+        if not match:
+            return (999, 999)
+        return (prefix_order.get(match.group(1), 999), int(match.group(2)))
+
+    runs.sort(key=lambda run: run_sort_key(run.run_id))
+    rows.sort(key=lambda row: (run_sort_key(str(row["run_id"])), str(row["benchmark"])))
 
     (ROOT / "benchmark_history_raw.md").write_text(build_markdown(runs, rows))
     write_summary_markdown(runs)
