@@ -16,7 +16,7 @@ Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (l
 | 2 | "BakaBobo" (Spread+Refine) | 1.4403 | — | — | 0 | 212s/bench |  |
 | 3 | "Convex Optimization" (UWaterloo Student) | 1.4556 | — | — | 0 | 16s total |  |
 | — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — | ✅ |
-| 4 | SA Placer (ours) | 1.4850 | 1.1079 | 1.7875 | 0 | 999.38s total |  |
+| 4 | SA Placer (ours) | 1.4803 | 1.1103 | 1.7872 | 0 | 676.83s total |  |
 | 5 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
 | 6 | HybridPlacer (ours) | 1.6977 | 1.2477 | 2.0305 | 0 | 324.72s total |  |
 | 7 | Learning Placer (ours) | 1.7060 | 1.2707 | 2.0338 | 0 | 457.74s total |  |

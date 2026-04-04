@@ -10,10 +10,11 @@ Generated from the note files in this directory.
 | L2 | Learning Placer | 2026-04-04 | Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | 2026-04-03 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7310 | 1.7310 | 406.00 | (SA + Analytical method) Omnellnotes.md |
 | A2 | Analytical Placer | 2026-04-04 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7394 | 1.7394 | 598.68 | (SA + Analytical method) Omnellnotes.md |
 | H1 | HybridPlacer | 2026-04-03 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6972 | 1.6972 | 1492.67 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | 2026-04-04 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
+| H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
 
 ## Benchmark-Level Records
 
@@ -87,6 +88,23 @@ Generated from the note files in this directory.
 | S2 | SA Placer | ibm16 | 1.5308 | 0.048 | 0.848 | 2.116 | 70.92 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | ibm17 | 1.7504 | 0.053 | 0.941 | 2.454 | 84.36 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | ibm18 | 1.7875 | 0.053 | 1.034 | 2.435 | 39.19 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm01 | 1.1281 | 0.069 | 0.822 | 1.296 | 22.34 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm02 | 1.6074 | 0.076 | 0.727 | 2.335 | 14.76 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm03 | 1.3752 | 0.079 | 0.771 | 1.865 | 35.23 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm04 | 1.3680 | 0.072 | 0.779 | 1.814 | 132.07 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm06 | 1.6848 | 0.063 | 0.764 | 2.576 | 35.86 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm07 | 1.4792 | 0.065 | 0.808 | 2.022 | 49.05 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm08 | 1.5132 | 0.070 | 0.840 | 2.066 | 45.89 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm09 | 1.1103 | 0.058 | 0.819 | 1.286 | 21.16 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm10 | 1.3703 | 0.065 | 0.707 | 1.889 | 81.26 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm11 | 1.2305 | 0.055 | 0.847 | 1.521 | 45.97 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm12 | 1.6458 | 0.061 | 0.750 | 2.412 | 77.21 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm13 | 1.3953 | 0.054 | 0.875 | 1.799 | 37.38 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm14 | 1.6007 | 0.051 | 0.948 | 2.146 | 91.98 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm15 | 1.5964 | 0.058 | 0.917 | 2.165 | 64.54 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm16 | 1.5238 | 0.048 | 0.848 | 2.116 | 70.92 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm17 | 1.7495 | 0.053 | 0.941 | 2.452 | 97.50 | (SA + Analytical method) Omnellnotes.md |
+| S3 | SA Placer | ibm18 | 1.7872 | 0.053 | 1.034 | 2.434 | 49.45 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm01 | 1.3845 | 0.103 | 1.017 | 1.546 | 10.07 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm02 | 1.7839 | 0.089 | 0.920 | 2.470 | 7.40 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm03 | 1.6980 | 0.095 | 1.054 | 2.152 | 7.75 | (SA + Analytical method) Omnellnotes.md |

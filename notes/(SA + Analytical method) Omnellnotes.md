@@ -162,3 +162,37 @@ Samla research papers till claude
 - SA is now clearly our strongest current method and is within 1.9% of RePlAce on proxy cost
 - Analytical remains competitive but is still congestion-limited and now sits well behind the new SA run
 - The current SA run also beats Will Seed on average proxy (1.4850 vs 1.5338)
+
+## Benchmark Results (2026-04-04, v2) — Greedy Macro Flipping
+
+Changes from previous SA run:
+- Added greedy macro flipping post-processing (try FN/FS/S orientations per macro, keep if HPWL improves)
+- Density-aware SA unchanged from previous run
+
+### SA Placer (PLACER_METHOD=sa)
+
+| Benchmark | proxy  | wl    | den   | cong  | Time    |
+|-----------|--------|-------|-------|-------|---------|
+| ibm01     | 1.1281 | 0.069 | 0.822 | 1.296 |  22.34s |
+| ibm02     | 1.6074 | 0.076 | 0.727 | 2.335 |  14.76s |
+| ibm03     | 1.3752 | 0.079 | 0.771 | 1.865 |  35.23s |
+| ibm04     | 1.3680 | 0.072 | 0.779 | 1.814 | 132.07s |
+| ibm06     | 1.6848 | 0.063 | 0.764 | 2.576 |  35.86s |
+| ibm07     | 1.4792 | 0.065 | 0.808 | 2.022 |  49.05s |
+| ibm08     | 1.5132 | 0.070 | 0.840 | 2.066 |  45.89s |
+| ibm09     | 1.1103 | 0.058 | 0.819 | 1.286 |  21.16s |
+| ibm10     | 1.3703 | 0.065 | 0.707 | 1.889 |  81.26s |
+| ibm11     | 1.2305 | 0.055 | 0.847 | 1.521 |  45.97s |
+| ibm12     | 1.6458 | 0.061 | 0.750 | 2.412 |  77.21s |
+| ibm13     | 1.3953 | 0.054 | 0.875 | 1.799 |  37.38s |
+| ibm14     | 1.6007 | 0.051 | 0.948 | 2.146 |  91.98s |
+| ibm15     | 1.5964 | 0.058 | 0.917 | 2.165 |  64.54s |
+| ibm16     | 1.5238 | 0.048 | 0.848 | 2.116 |  70.92s |
+| ibm17     | 1.7495 | 0.053 | 0.941 | 2.452 |  97.50s |
+| ibm18     | 1.7872 | 0.053 | 1.034 | 2.434 |  49.45s |
+| **AVG**   |**1.4803**|     |       |       | 676.83s |
+
+- Improved from 1.4850 → 1.4803 (+0.3%)
+- Now only 1.5% behind RePlAce (was 1.9%)
+- Beats RePlAce on 4/17 benchmarks (ibm02, ibm09, ibm10, ibm12)
+- Beats SA baseline on all 17/17 benchmarks
