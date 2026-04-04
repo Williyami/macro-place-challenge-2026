@@ -245,7 +245,7 @@ Benchmark-history tracking for the note sections lives in:
 - [Summary](notes/benchmark%20history/benchmark_history_summary.md)
 - [Raw data](notes/benchmark%20history/benchmark_history_raw.md)
 
-![Benchmark history summary](notes/benchmark%20history/benchmark_history_summary.png)
+![Benchmark history summary](notes/benchmark%20history/benchmark_history_full_suite.png)
 
 ## 🤔 FAQ
 

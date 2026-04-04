@@ -5,7 +5,7 @@ This graph summarizes the full-suite benchmark sections logged in the notes.
 - Top plot: proxy trend over run history using the logged AVG proxy from each full-suite run.
 - Bottom plot: how many benchmarks were logged in each included run.
 
-![Benchmark history summary](benchmark_history_summary.png)
+![Benchmark history summary](benchmark_history_full_suite.png)
 
 ## Included Runs
 
