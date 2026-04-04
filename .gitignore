@@ -53,6 +53,10 @@ results/
 *.pth
 *.ckpt
 
+# Exception: Allow pre-trained learning placer weights
+!submissions/learning_weights/
+!submissions/learning_weights/*.pt
+
 # Exception: Allow processed public benchmarks (so users can clone and use immediately)
 !benchmarks/processed/
 !benchmarks/processed/public/
