@@ -631,6 +631,95 @@ def _sa_refine(
     return best_pos
 
 
+# ── greedy macro flipping ───────────────────────────────────────────────────
+
+def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
+    """Try flipping each hard macro's pin offsets; keep if HPWL improves.
+
+    Orientations tried (relative to current N):
+      FN  → negate x_offset  (mirror across Y axis)
+      FS  → negate y_offset  (mirror across X axis)
+      S   → negate both      (180° rotation)
+
+    Updates *nets* pin offsets in-place and sets plc pin offsets to match.
+    """
+    n_hard = len(movable)
+    improved = 0
+
+    for i in range(n_hard):
+        if not movable[i]:
+            continue
+        affected = macro_to_nets[i]
+        if not affected:
+            continue
+
+        # Current HPWL for affected nets
+        base_hpwl = sum(_net_hpwl(nets[ni], pos) for ni in affected)
+        best_hpwl = base_hpwl
+        best_flip = None  # None = keep current orientation
+
+        # Collect (net_idx, pin_position_in_array) for all pins of macro i
+        pin_locs = []  # (net_idx, array_index_within_net)
+        for ni in affected:
+            net = nets[ni]
+            idxs = net["hard_idx"]
+            for k in range(len(idxs)):
+                if idxs[k] == i:
+                    pin_locs.append((ni, k))
+
+        # Save original offsets
+        orig_ox = [(ni, k, nets[ni]["hard_ox"][k]) for ni, k in pin_locs]
+        orig_oy = [(ni, k, nets[ni]["hard_oy"][k]) for ni, k in pin_locs]
+
+        for flip_name, flip_x, flip_y in [("FN", True, False),
+                                            ("FS", False, True),
+                                            ("S",  True, True)]:
+            # Apply flip
+            for ni, k, ox in orig_ox:
+                nets[ni]["hard_ox"][k] = -ox if flip_x else ox
+            for ni, k, oy in orig_oy:
+                nets[ni]["hard_oy"][k] = -oy if flip_y else oy
+
+            trial_hpwl = sum(_net_hpwl(nets[ni], pos) for ni in affected)
+            if trial_hpwl < best_hpwl:
+                best_hpwl = trial_hpwl
+                best_flip = (flip_x, flip_y, flip_name)
+
+            # Restore originals
+            for ni, k, ox in orig_ox:
+                nets[ni]["hard_ox"][k] = ox
+            for ni, k, oy in orig_oy:
+                nets[ni]["hard_oy"][k] = oy
+
+        if best_flip is not None:
+            flip_x, flip_y, flip_name = best_flip
+            # Apply the winning flip permanently to net data
+            for ni, k, ox in orig_ox:
+                if flip_x:
+                    nets[ni]["hard_ox"][k] = -ox
+            for ni, k, oy in orig_oy:
+                if flip_y:
+                    nets[ni]["hard_oy"][k] = -oy
+
+            # Update plc pin offsets so evaluation reflects the flip
+            if plc is not None:
+                plc_idx = plc.hard_macro_indices[i]
+                macro_name = plc.modules_w_pins[plc_idx].get_name()
+                pin_names = plc.hard_macros_to_inpins.get(macro_name, [])
+                for pin_name in pin_names:
+                    if pin_name not in plc.mod_name_to_indices:
+                        continue
+                    pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
+                    ox, oy = pin_obj.get_offset()
+                    new_ox = -ox if flip_x else ox
+                    new_oy = -oy if flip_y else oy
+                    pin_obj.set_offset(new_ox, new_oy)
+
+            improved += 1
+
+    return improved
+
+
 # ── soft-macro force-directed update ────────────────────────────────────────
 
 def _update_soft_macros(pos_hard: np.ndarray, benchmark: Benchmark, plc) -> np.ndarray:
@@ -852,6 +941,10 @@ class SAPlacer(BasePlacer):
                     best_pos = pos
         else:
             best_pos = init_pos
+
+        # Greedy macro flipping post-processing
+        if nets:
+            _greedy_flip(best_pos, nets, macro_to_nets, movable, plc)
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
