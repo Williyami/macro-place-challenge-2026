@@ -355,7 +355,7 @@ def write_summary_markdown(runs: list[RunRecord]) -> None:
         "- Top plot: proxy trend over run history using the logged AVG proxy from each full-suite run.",
         "- Bottom plot: how many benchmarks were logged in each included run.",
         "",
-        "![Benchmark history summary](benchmark_history_summary.png)",
+        "![Benchmark history summary](benchmark_history_full_suite.png)",
         "",
         "## Included Runs",
         "",
@@ -444,7 +444,7 @@ def plot_history(runs: list[RunRecord]) -> None:
     ax2.set_xticklabels([run.run_id for run in runs], rotation=0)
 
     fig.tight_layout()
-    fig.savefig(ROOT / "benchmark_history_summary.png", dpi=180, bbox_inches="tight")
+    fig.savefig(ROOT / "benchmark_history_full_suite.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
