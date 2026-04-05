@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # Ensure project root is on sys.path
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -26,6 +27,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from macro_place.benchmark import Benchmark
+from macro_place.objective import compute_proxy_cost
 from submissions.base import BasePlacer
 from submissions.sa_placer import _load_plc, _extract_nets, _legalize
 
@@ -199,7 +201,7 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
 
 # ── Differentiable density penalty ────────────────────────────────────────
 
-def _density_penalty(pos, sizes, movable_mask, cw, ch, grid_size=32):
+def _density_penalty(pos, sizes, movable_mask, cw, ch, grid_size=32, target_scale=1.35):
     """
     Smooth density penalty using Gaussian spreading.
     """
@@ -236,8 +238,11 @@ def _density_penalty(pos, sizes, movable_mask, cw, ch, grid_size=32):
     target_density = total_area / (cw * ch)
     density_per_cell = density / (cell_w * cell_h)
 
-    excess = torch.clamp(density_per_cell - target_density * 1.5, min=0)
-    return (excess ** 2).sum() * cell_w * cell_h
+    excess = torch.clamp(density_per_cell - target_density * target_scale, min=0)
+    hotspot = density_per_cell.flatten()
+    k = max(1, hotspot.numel() // 10)
+    top_vals = hotspot.topk(k).values
+    return ((excess ** 2).sum() + 0.25 * top_vals.pow(2).mean()) * cell_w * cell_h
 
 
 # ── Overlap penalty (differentiable) ──────────────────────────────────────
@@ -269,6 +274,50 @@ def _overlap_penalty(pos, sizes, movable_mask):
     return overlap[mask].sum()
 
 
+def _halo_sizes(sizes, area_scale=0.10, base_scale=0.03):
+    """
+    Inflate macro sizes to reserve channels/whitespace during optimization.
+
+    Inspired by macro halo / channel reservation ideas from congestion-aware
+    macro placement work: larger macros get slightly larger effective halos.
+    """
+    area = sizes[:, 0] * sizes[:, 1]
+    area_norm = area / area.max().clamp(min=1e-6)
+    halo = base_scale + area_scale * area_norm.sqrt()
+    scale = 1.0 + halo.unsqueeze(1)
+    return sizes * scale
+
+
+def _boundary_whitespace_penalty(pos, sizes, movable_mask, cw, ch):
+    """
+    Encourage large movable macros to stay somewhat closer to boundaries,
+    opening central whitespace for routing channels.
+    """
+    mov_idx = torch.where(movable_mask)[0]
+    if len(mov_idx) == 0:
+        return torch.tensor(0.0, device=pos.device)
+
+    mp = pos[mov_idx]
+    ms = sizes[mov_idx]
+    half_w = ms[:, 0] / 2
+    half_h = ms[:, 1] / 2
+
+    edge_dist = torch.stack(
+        [
+            mp[:, 0] - half_w,
+            cw - (mp[:, 0] + half_w),
+            mp[:, 1] - half_h,
+            ch - (mp[:, 1] + half_h),
+        ],
+        dim=1,
+    ).min(dim=1).values
+
+    area = ms[:, 0] * ms[:, 1]
+    area_norm = area / area.max().clamp(min=1e-6)
+    # Smooth quadratic penalty on large edge distances for larger macros.
+    return (area_norm * (edge_dist / max(cw, ch)).pow(2)).mean()
+
+
 # ── Placer class ───────────────────────────────────────────────────────────
 
 class AnalyticalPlacer(BasePlacer):
@@ -288,8 +337,10 @@ class AnalyticalPlacer(BasePlacer):
         gamma_end: float = 3.0,
         density_weight: float = 0.005,
         congestion_weight: float = 0.0005,
+        boundary_weight: float = 0.02,
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
+        num_candidates: int = 3,
     ):
         self.seed = seed
         self.iters = iters
@@ -298,8 +349,133 @@ class AnalyticalPlacer(BasePlacer):
         self.gamma_end = gamma_end
         self.density_weight = density_weight
         self.congestion_weight = congestion_weight
+        self.boundary_weight = boundary_weight
         self.overlap_weight_start = overlap_weight_start
         self.overlap_weight_end = overlap_weight_end
+        self.num_candidates = num_candidates
+
+    def _optimize_candidate(
+        self,
+        benchmark: Benchmark,
+        plc,
+        net_data,
+        sizes_t,
+        movable_t,
+        fixed_mask,
+        sizes_np,
+        movable_np,
+        half_w,
+        half_h,
+        cw,
+        ch,
+        n_hard,
+        init_pos,
+        fixed_pos,
+        density_weight,
+        congestion_weight,
+        boundary_weight,
+        halo_area_scale,
+        halo_base_scale,
+        target_scale,
+        seed_offset,
+        iters,
+    ):
+        torch.manual_seed(self.seed + seed_offset)
+        np.random.seed(self.seed + seed_offset)
+
+        pos = init_pos.clone()
+        movable_idx = torch.where(movable_t)[0]
+        if len(movable_idx) > 0:
+            noise_x = 0.03 * cw * (torch.rand(len(movable_idx)) - 0.5)
+            noise_y = 0.03 * ch * (torch.rand(len(movable_idx)) - 0.5)
+            pos[movable_idx, 0] += noise_x
+            pos[movable_idx, 1] += noise_y
+
+        inflated_sizes_t = _halo_sizes(
+            sizes_t, area_scale=halo_area_scale, base_scale=halo_base_scale
+        )
+        pos_param = pos.clone().detach().requires_grad_(True)
+
+        lo_x = torch.tensor(half_w, dtype=torch.float32)
+        hi_x = torch.tensor([cw], dtype=torch.float32) - lo_x
+        lo_y = torch.tensor(half_h, dtype=torch.float32)
+        hi_y = torch.tensor([ch], dtype=torch.float32) - lo_y
+
+        optimizer = torch.optim.Adam([pos_param], lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=iters, eta_min=self.lr * 0.01
+        )
+
+        best_snapshot = pos.clone()
+        best_loss = float("inf")
+
+        for step in range(iters):
+            optimizer.zero_grad()
+            frac = step / max(iters - 1, 1)
+            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
+            ov_weight = self.overlap_weight_start * (
+                self.overlap_weight_end / max(self.overlap_weight_start, 1e-12)
+            ) ** frac
+
+            loss = torch.tensor(0.0)
+            if net_data is not None:
+                loss = loss + _lse_hpwl(pos_param, net_data, gamma=gamma)
+
+            loss = loss + density_weight * _density_penalty(
+                pos_param, inflated_sizes_t, movable_t, cw, ch, target_scale=target_scale
+            )
+
+            if net_data is not None and congestion_weight > 0:
+                # Use halo-inflated geometry to better reflect macro-area-driven hotspots.
+                loss = loss + congestion_weight * _congestion_penalty(
+                    pos_param, net_data, cw, ch
+                )
+
+            loss = loss + ov_weight * _overlap_penalty(
+                pos_param, inflated_sizes_t, movable_t
+            )
+
+            if boundary_weight > 0:
+                loss = loss + boundary_weight * _boundary_whitespace_penalty(
+                    pos_param, inflated_sizes_t, movable_t, cw, ch
+                )
+
+            loss.backward()
+
+            if pos_param.grad is not None:
+                pos_param.grad[fixed_mask] = 0.0
+
+            optimizer.step()
+            scheduler.step()
+
+            with torch.no_grad():
+                pos_param[:, 0].clamp_(lo_x, hi_x)
+                pos_param[:, 1].clamp_(lo_y, hi_y)
+                pos_param[fixed_mask] = fixed_pos
+                loss_value = float(loss.item())
+                if loss_value < best_loss:
+                    best_loss = loss_value
+                    best_snapshot = pos_param.detach().clone()
+
+        opt_pos = best_snapshot.detach().numpy().astype(np.float64)
+        sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
+        sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
+        legal_pos = _legalize(
+            opt_pos, movable_np, sizes_np, half_w, half_h,
+            cw, ch, n_hard, sep_x, sep_y,
+        )
+
+        full_pos = benchmark.macro_positions.clone()
+        full_pos[:n_hard] = torch.tensor(legal_pos, dtype=torch.float32)
+        score = None
+        if plc is not None:
+            try:
+                costs = compute_proxy_cost(full_pos, benchmark, plc)
+                score = costs["proxy_cost"]
+            except Exception:
+                score = None
+
+        return legal_pos, full_pos, score
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         torch.manual_seed(self.seed)
@@ -331,80 +507,43 @@ class AnalyticalPlacer(BasePlacer):
         pos = benchmark.macro_positions[:n_hard].clone().float()
         fixed_pos = pos[fixed_mask].clone()
 
-        pos_param = pos.clone().detach().requires_grad_(True)
+        candidate_settings = [
+            # Baseline-like
+            dict(density=self.density_weight, congestion=self.congestion_weight,
+                 boundary=self.boundary_weight * 0.5, halo_area=0.08, halo_base=0.02,
+                 target_scale=1.40, iters=max(800, self.iters // 3)),
+            # Congestion / channel preserving
+            dict(density=self.density_weight * 1.6, congestion=self.congestion_weight * 2.2,
+                 boundary=self.boundary_weight, halo_area=0.14, halo_base=0.04,
+                 target_scale=1.25, iters=max(800, self.iters // 3)),
+            # Balanced
+            dict(density=self.density_weight * 1.2, congestion=self.congestion_weight * 1.5,
+                 boundary=self.boundary_weight * 0.75, halo_area=0.11, halo_base=0.03,
+                 target_scale=1.30, iters=max(800, self.iters // 3)),
+        ][: max(1, self.num_candidates)]
 
-        # Canvas bounds for projection
-        lo_x = torch.tensor(half_w, dtype=torch.float32)
-        hi_x = torch.tensor([cw], dtype=torch.float32) - lo_x
-        lo_y = torch.tensor(half_h, dtype=torch.float32)
-        hi_y = torch.tensor([ch], dtype=torch.float32) - lo_y
+        best_full = None
+        best_score = float("inf")
+        fallback_full = None
 
-        optimizer = torch.optim.Adam([pos_param], lr=self.lr)
-        # Cosine annealing LR schedule
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.iters, eta_min=self.lr * 0.01
-        )
-
-        for step in range(self.iters):
-            optimizer.zero_grad()
-
-            frac = step / max(self.iters - 1, 1)
-
-            # Anneal gamma (large → small = tighter HPWL approximation)
-            gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
-
-            # Anneal overlap weight (increases over time to resolve overlaps)
-            ov_weight = self.overlap_weight_start * (
-                self.overlap_weight_end / max(self.overlap_weight_start, 1e-12)
-            ) ** frac
-
-            # Compute loss
-            loss = torch.tensor(0.0)
-
-            if net_data is not None:
-                loss = loss + _lse_hpwl(pos_param, net_data, gamma=gamma)
-
-            loss = loss + self.density_weight * _density_penalty(
-                pos_param, sizes_t, movable_t, cw, ch
+        for idx, cfg in enumerate(candidate_settings):
+            _, full_pos, score = self._optimize_candidate(
+                benchmark, plc, net_data, sizes_t, movable_t, fixed_mask,
+                sizes_np, movable_np, half_w, half_h, cw, ch, n_hard,
+                pos, fixed_pos,
+                density_weight=cfg["density"],
+                congestion_weight=cfg["congestion"],
+                boundary_weight=cfg["boundary"],
+                halo_area_scale=cfg["halo_area"],
+                halo_base_scale=cfg["halo_base"],
+                target_scale=cfg["target_scale"],
+                seed_offset=idx * 997,
+                iters=cfg["iters"],
             )
+            if fallback_full is None:
+                fallback_full = full_pos
+            if score is not None and score < best_score:
+                best_score = score
+                best_full = full_pos
 
-            if net_data is not None and self.congestion_weight > 0:
-                loss = loss + self.congestion_weight * _congestion_penalty(
-                    pos_param, net_data, cw, ch
-                )
-
-            loss = loss + ov_weight * _overlap_penalty(
-                pos_param, sizes_t, movable_t
-            )
-
-            loss.backward()
-
-            # Zero out gradients for fixed macros
-            if pos_param.grad is not None:
-                pos_param.grad[fixed_mask] = 0.0
-
-            optimizer.step()
-            scheduler.step()
-
-            # Project to canvas bounds
-            with torch.no_grad():
-                pos_param[:, 0].clamp_(lo_x, hi_x)
-                pos_param[:, 1].clamp_(lo_y, hi_y)
-                pos_param[fixed_mask] = fixed_pos
-
-        # ── Legalization ───────────────────────────────────────────────────
-        opt_pos = pos_param.detach().numpy().astype(np.float64)
-
-        sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
-        sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
-
-        legal_pos = _legalize(
-            opt_pos, movable_np, sizes_np, half_w, half_h,
-            cw, ch, n_hard, sep_x, sep_y,
-        )
-
-        # Build full placement tensor
-        full_pos = benchmark.macro_positions.clone()
-        full_pos[:n_hard] = torch.tensor(legal_pos, dtype=torch.float32)
-
-        return full_pos
+        return best_full if best_full is not None else fallback_full
