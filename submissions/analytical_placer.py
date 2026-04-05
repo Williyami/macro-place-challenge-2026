@@ -152,13 +152,21 @@ def _lse_hpwl(pos, net_data, gamma=10.0):
 
 # ── Differentiable congestion proxy ───────────────────────────────────────
 
-def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
+def _congestion_penalty(
+    pos,
+    net_data,
+    cw,
+    ch,
+    grid_cols=32,
+    grid_rows=32,
+    headroom=1.85,
+):
     """
-    Smooth congestion proxy: approximate routing demand per grid cell.
+    Smooth congestion proxy aligned with PlacementCost routing grid when
+    grid_cols/grid_rows match plc.grid_col/plc.grid_row.
 
-    For each net, the bounding box determines which cells need routing.
-    We spread the net's demand smoothly using sigmoid-based soft indicators.
-    Penalizes cells where demand exceeds a target capacity.
+    Penalizes squared excess demand plus a light peak term on the hottest cells
+    so optimization pushes down congestion (the dominant term on IBM01).
     """
     px, py = _get_pin_positions(pos, net_data)
     mask = net_data["pin_mask"]
@@ -176,18 +184,15 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
     net_ymax = py_max.max(dim=1).values
 
     device = pos.device
-    cell_w = cw / grid_size
-    cell_h = ch / grid_size
+    cell_w = cw / grid_cols
+    cell_h = ch / grid_rows
 
-    # Grid cell centers
-    cx = torch.linspace(cell_w / 2, cw - cell_w / 2, grid_size, device=device)
-    cy = torch.linspace(cell_h / 2, ch - cell_h / 2, grid_size, device=device)
+    # Grid cell centers (match evaluator bin geometry)
+    cx = torch.linspace(cell_w / 2, cw - cell_w / 2, grid_cols, device=device)
+    cy = torch.linspace(cell_h / 2, ch - cell_h / 2, grid_rows, device=device)
 
-    # Soft indicator: is cell center inside net bounding box?
-    # Using sigmoid for smooth differentiability
     sharpness = 4.0 / max(cell_w, cell_h)
 
-    # cx: [G], net_xmin: [N] → indicator: [N, G]
     in_x = torch.sigmoid(sharpness * (cx.unsqueeze(0) - net_xmin.unsqueeze(1))) * \
            torch.sigmoid(sharpness * (net_xmax.unsqueeze(1) - cx.unsqueeze(0)))
     in_y = torch.sigmoid(sharpness * (cy.unsqueeze(0) - net_ymin.unsqueeze(1))) * \
@@ -195,12 +200,10 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
 
     weights = net_data["net_weights"]  # [N]
 
-    # Routing demand: [G, G] = sum over nets of weight * in_x * in_y
     demand = torch.einsum("ni,nj,n->ij", in_x, in_y, weights)
 
-    # Target capacity (uniform distribution of total demand)
     total_demand = (weights * ((net_xmax - net_xmin) / cw) * ((net_ymax - net_ymin) / ch)).sum()
-    target = total_demand / (grid_size * grid_size) * 2.0  # 2x headroom
+    target = total_demand / (grid_cols * grid_rows) * headroom
 
     excess = torch.clamp(demand - target, min=0)
     return (excess ** 2).sum()
@@ -208,7 +211,15 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
 
 # ── Differentiable density penalty (evaluator-matched) ───────────────────
 
-def _density_penalty(pos, sizes, cw, ch, grid_size=32, target_scale=1.35):
+def _density_penalty(
+    pos,
+    sizes,
+    cw,
+    ch,
+    grid_cols=32,
+    grid_rows=32,
+    target_scale=1.35,
+):
     """
     Bin-based density penalty matching the evaluator's computation.
 
@@ -217,8 +228,8 @@ def _density_penalty(pos, sizes, cw, ch, grid_size=32, target_scale=1.35):
     densest cells (matching evaluator's density cost formula).
     """
     device = pos.device
-    cell_w = cw / grid_size
-    cell_h = ch / grid_size
+    cell_w = cw / grid_cols
+    cell_h = ch / grid_rows
     grid_area = cell_w * cell_h
 
     # All macros contribute to density (not just movable)
@@ -227,10 +238,9 @@ def _density_penalty(pos, sizes, cw, ch, grid_size=32, target_scale=1.35):
         return torch.tensor(0.0, device=device)
 
     # Grid cell boundaries
-    # For each cell j, the interval is [j*cell_w, (j+1)*cell_w]
-    bin_x_lo = torch.linspace(0, cw - cell_w, grid_size, device=device)
+    bin_x_lo = torch.linspace(0, cw - cell_w, grid_cols, device=device)
     bin_x_hi = bin_x_lo + cell_w
-    bin_y_lo = torch.linspace(0, ch - cell_h, grid_size, device=device)
+    bin_y_lo = torch.linspace(0, ch - cell_h, grid_rows, device=device)
     bin_y_hi = bin_y_lo + cell_h
 
     # Macro boundaries
@@ -493,17 +503,17 @@ class AnalyticalPlacer(BasePlacer):
     def __init__(
         self,
         seed: int = 42,
-        iters: int = 3_000,
+        iters: int = 3_600,
         lr: float = 5.0,
         gamma_start: float = 50.0,
         gamma_end: float = 3.0,
         density_weight: float = 0.005,
-        congestion_weight: float = 0.0005,
+        congestion_weight: float = 0.00055,
         boundary_weight: float = 0.02,
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
         num_candidates: int = 3,
-        sa_polish_iters: int = 80_000,
+        sa_polish_iters: int = 88_000,
     ):
         self.seed = seed
         self.iters = iters
@@ -544,6 +554,8 @@ class AnalyticalPlacer(BasePlacer):
         seed_offset,
         iters,
         repulsion_weight=0.0,
+        grid_cols=32,
+        grid_rows=32,
     ):
         torch.manual_seed(self.seed + seed_offset)
         np.random.seed(self.seed + seed_offset)
@@ -583,21 +595,35 @@ class AnalyticalPlacer(BasePlacer):
             ) ** frac
 
             # Progressive density weight: start at 0.1x, ramp to full
-            # (RePlAce-style penalty schedule for better convergence)
             density_ramp = 0.1 + 0.9 * min(1.0, frac * 2.5)
-            eff_density_weight = density_weight * density_ramp
+            # Last 30%: gently favor congestion/density; ease repulsion so WL can recover
+            late = 0.0 if frac < 0.70 else (frac - 0.70) / 0.30
+            eff_density_weight = density_weight * density_ramp * (1.0 + 0.32 * late)
+            eff_cong_w = congestion_weight * (1.0 + 0.55 * late)
+            rep_scale = density_ramp * (1.0 - 0.38 * late)
 
-            loss = torch.tensor(0.0)
+            loss = torch.tensor(0.0, device=pos_param.device)
             if net_data is not None:
                 loss = loss + _lse_hpwl(pos_param, net_data, gamma=gamma)
 
             loss = loss + eff_density_weight * _density_penalty(
-                pos_param, inflated_sizes_t, cw, ch, target_scale=target_scale
+                pos_param,
+                inflated_sizes_t,
+                cw,
+                ch,
+                grid_cols=grid_cols,
+                grid_rows=grid_rows,
+                target_scale=target_scale,
             )
 
-            if net_data is not None and congestion_weight > 0:
-                loss = loss + congestion_weight * _congestion_penalty(
-                    pos_param, net_data, cw, ch
+            if net_data is not None and eff_cong_w > 0:
+                loss = loss + eff_cong_w * _congestion_penalty(
+                    pos_param,
+                    net_data,
+                    cw,
+                    ch,
+                    grid_cols=grid_cols,
+                    grid_rows=grid_rows,
                 )
 
             loss = loss + ov_weight * _overlap_penalty(
@@ -605,8 +631,7 @@ class AnalyticalPlacer(BasePlacer):
             )
 
             if repulsion_weight > 0:
-                # Repulsion ramps up with density (both push spreading)
-                loss = loss + repulsion_weight * density_ramp * _repulsion_penalty(
+                loss = loss + repulsion_weight * rep_scale * _repulsion_penalty(
                     pos_param, inflated_sizes_t, movable_t
                 )
 
@@ -681,6 +706,12 @@ class AnalyticalPlacer(BasePlacer):
 
         net_data = _build_net_tensors(nets) if nets else None
 
+        if plc is not None and getattr(plc, "grid_col", 0) and getattr(plc, "grid_row", 0):
+            grid_cols = int(plc.grid_col)
+            grid_rows = int(plc.grid_row)
+        else:
+            grid_cols, grid_rows = 32, 32
+
         # Initialise: try quadratic placement from connectivity, fall back to initial.plc
         initial_pos = benchmark.macro_positions[:n_hard].clone().float()
         fixed_pos = initial_pos[fixed_mask].clone()
@@ -694,19 +725,15 @@ class AnalyticalPlacer(BasePlacer):
         else:
             quad_pos = initial_pos.clone()
 
-        # Per-candidate iteration budget
         per_candidate_iters = max(2000, self.iters // 2)
 
         candidate_settings = [
-            # Quadratic init — balanced with repulsion
             dict(density=self.density_weight * 1.5, congestion=self.congestion_weight * 1.5,
                  boundary=self.boundary_weight * 0.3, halo_area=0.10, halo_base=0.03,
                  target_scale=1.30, repulsion=0.5, iters=per_candidate_iters, init=quad_pos),
-            # Quadratic init — strong density/repulsion spreading
             dict(density=self.density_weight * 3.0, congestion=self.congestion_weight * 3.0,
                  boundary=self.boundary_weight * 0.5, halo_area=0.16, halo_base=0.05,
                  target_scale=1.10, repulsion=1.0, iters=per_candidate_iters, init=quad_pos),
-            # Initial.plc init — density-focused
             dict(density=self.density_weight * 2.0, congestion=self.congestion_weight * 2.0,
                  boundary=self.boundary_weight * 0.5, halo_area=0.12, halo_base=0.04,
                  target_scale=1.20, repulsion=0.8, iters=per_candidate_iters, init=initial_pos),
@@ -731,6 +758,8 @@ class AnalyticalPlacer(BasePlacer):
                 seed_offset=idx * 997,
                 iters=cfg["iters"],
                 repulsion_weight=cfg["repulsion"],
+                grid_cols=grid_cols,
+                grid_rows=grid_rows,
             )
             if fallback_full is None:
                 fallback_full = full_pos
@@ -773,7 +802,7 @@ class AnalyticalPlacer(BasePlacer):
                     grid_col = grid_row = 0
                     density_w = 0.0
 
-            # Multi-start SA polish: run multiple starts, keep best
+            # Multi-start SA polish (matches main SA placer cooling + reheating)
             best_polished_score = best_score
             best_polished_full = best_full
 
@@ -784,8 +813,10 @@ class AnalyticalPlacer(BasePlacer):
                     cw, ch,
                     max_iters=self.sa_polish_iters,
                     seed=self.seed + 7777 + sa_start * 1000,
-                    t_start_factor=0.08,
-                    t_end_factor=0.0005,
+                    t_start_factor=0.12,
+                    t_end_factor=0.0008,
+                    reheat_threshold=12000,
+                    reheat_factor=2.5,
                     density_weight=density_w,
                     grid_col=grid_col,
                     grid_row=grid_row,
