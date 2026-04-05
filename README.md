@@ -18,7 +18,7 @@ Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (l
 | — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — | ✅ |
 | 4 | SA Placer (ours) | 1.4803 | 1.1103 | 1.7872 | 0 | 676.83s total |  |
 | 5 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
-| 6 | Learning Placer (ours) | 1.6282 | 1.1795 | 1.9648 | 0 | 2000.80s total |  |
+| 6 | Learning Placer (ours) | 1.6353 | 1.1544 | 2.0281 | 0 | 2275.30s total |  |
 | 7 | HybridPlacer (ours) | 1.6977 | 1.2477 | 2.0305 | 0 | 324.72s total |  |
 | 8 | Analytical Placer (ours) | 1.7394 | 1.3438 | 2.0684 | 0 | 598.68s total |  |
 | — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — | ✅ |

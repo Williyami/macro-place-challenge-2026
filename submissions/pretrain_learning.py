@@ -37,6 +37,7 @@ from macro_place.loader import load_benchmark_from_dir, load_benchmark
 from submissions.learning_placer import (
     NetlistGNN, _build_net_tensors, _build_features,
     _lse_hpwl, _smooth_density_penalty, _smooth_overlap_penalty,
+    _rudy_congestion_proxy,
 )
 from submissions.sa_placer import _load_plc, _extract_nets
 
@@ -117,6 +118,14 @@ def _extract_training_data(name: str, benchmark: Benchmark):
         nets_raw, n_hard, torch.device("cpu")
     )
 
+    # Extract plc grid parameters for RUDY congestion proxy
+    grid_col = getattr(plc, 'grid_col', 10)
+    grid_row = getattr(plc, 'grid_row', 10)
+    hroutes = getattr(plc, 'hroutes_per_micron', 1.0)
+    vroutes = getattr(plc, 'vroutes_per_micron', 1.0)
+    halloc = getattr(plc, 'hrouting_alloc', 0.0)
+    valloc = getattr(plc, 'vrouting_alloc', 0.0)
+
     return {
         "name": name,
         "n_hard": n_hard,
@@ -134,6 +143,12 @@ def _extract_training_data(name: str, benchmark: Benchmark):
         "fixed_mask": fixed_mask,
         "orig_pos": orig_pos,
         "plc": plc,
+        "grid_col": grid_col,
+        "grid_row": grid_row,
+        "hroutes_per_micron": hroutes,
+        "vroutes_per_micron": vroutes,
+        "hrouting_alloc": halloc,
+        "vrouting_alloc": valloc,
     }
 
 
@@ -215,51 +230,7 @@ def augment_data(data: dict, transform: int) -> dict:
     return aug
 
 
-# ── Congestion loss ────────────────────────────────────────────────────────
-
-def _congestion_loss(pos: torch.Tensor, sizes: torch.Tensor,
-                     cw: float, ch: float, grid_n: int = 16) -> torch.Tensor:
-    """
-    Differentiable congestion proxy inspired by routing demand estimation.
-
-    From the Synopsys paper and DREAMPlace: estimates horizontal and vertical
-    routing congestion by computing macro pin density in grid cells, weighted
-    by adjacency (net connections cross grid boundaries).
-
-    Approximated as the variance of macro coverage across grid cells —
-    high variance means some cells are very congested while others are empty.
-    """
-    cell_w = cw / grid_n
-    cell_h = ch / grid_n
-    cell_area = cell_w * cell_h
-
-    half_w = sizes[:, 0] / 2
-    half_h = sizes[:, 1] / 2
-
-    macro_l = pos[:, 0] - half_w
-    macro_r = pos[:, 0] + half_w
-    macro_b = pos[:, 1] - half_h
-    macro_t = pos[:, 1] + half_h
-
-    gx = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_w + cell_w / 2
-    gy = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_h + cell_h / 2
-
-    grid_l = gx - cell_w / 2
-    grid_r = gx + cell_w / 2
-    grid_b = gy - cell_h / 2
-    grid_t = gy + cell_h / 2
-
-    ox = F.relu(torch.min(macro_r.unsqueeze(1), grid_r.unsqueeze(0))
-                - torch.max(macro_l.unsqueeze(1), grid_l.unsqueeze(0)))
-    oy = F.relu(torch.min(macro_t.unsqueeze(1), grid_t.unsqueeze(0))
-                - torch.max(macro_b.unsqueeze(1), grid_b.unsqueeze(0)))
-
-    overlap = ox.unsqueeze(2) * oy.unsqueeze(1)
-    density = overlap.sum(0) / cell_area
-
-    # Congestion = variance of density (spread should be even)
-    cong_loss = density.var() + F.relu(density - 1.0).pow(2).mean()
-    return cong_loss
+# ── Congestion loss (now uses RUDY-based proxy from learning_placer) ──────
 
 
 # ── Per-macro local HPWL ───────────────────────────────────────────────────
@@ -335,9 +306,20 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
 
     loss = loss_wl + loss_den + loss_ov
 
-    # Congestion loss (matches actual scoring: proxy = WL + 0.5*density + 0.5*congestion)
+    # RUDY-based congestion loss (matches actual evaluator metric)
     if use_congestion:
-        loss_cong = _congestion_loss(pos, sizes, cw, ch, grid_n=16) * (cw * ch) * (0.005 + 0.02 * frac)
+        cong_weight = 0.5 * (0.01 + 0.04 * frac)
+        loss_cong = _rudy_congestion_proxy(
+            pos, sizes,
+            net_batches=data["net_batches"],
+            cw=cw, ch=ch,
+            grid_col=data.get("grid_col", 10),
+            grid_row=data.get("grid_row", 10),
+            hroutes_per_micron=data.get("hroutes_per_micron", 1.0),
+            vroutes_per_micron=data.get("vroutes_per_micron", 1.0),
+            hrouting_alloc=data.get("hrouting_alloc", 0.0),
+            vrouting_alloc=data.get("vrouting_alloc", 0.0),
+        ) * cong_weight
         loss = loss + loss_cong
 
     # Per-net local HPWL loss (dense gradient signal from HRLP paper)

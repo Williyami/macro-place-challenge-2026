@@ -92,3 +92,45 @@ Beat SA baseline on 15/17. Beat RePlAce on 0/17.
 **Major improvement: 1.7060 -> 1.6282 (-4.6%).**
 Pre-trained GNN + density SA polish + flipping all contributed.
 Still behind SA placer (1.4803) — the GNN initial placement helps but SA from initial.plc converges better.
+
+## 2026-04-05 — v3: Research-paper-informed pretraining improvements
+
+Changes (informed by research papers in notes/researchmaterial/):
+- **Non-IBM benchmarks**: Pre-trained across 21 benchmarks (17 IBM + 4 NanGate45: ariane133, ariane136, nvdla, mempool)
+- **Data augmentation**: Flip transforms (2x effective dataset) — from AutoDMP paper
+- **Congestion-aware loss**: Added differentiable congestion penalty to both pretraining and fine-tuning, aligning with actual proxy_cost scoring (WL + 0.5×density + 0.5×congestion) — from Synopsys congestion paper
+- **Curriculum learning**: Benchmarks sorted easy→hard by macro count — from HRLP paper
+- **Per-net local HPWL loss**: Denser gradient signal per net — from HRLP paper
+- **Prioritized training**: More epochs on harder benchmarks (0.5x-2x scaling) — from MCTS+RL paper
+
+Pretrained with: `--epochs 50 --rounds 5 --augment-transforms 2` (~30 min on CPU)
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.1544 | 0.069 | 0.850 | 1.321 | 62.04s | BETTER (1.3166) |
+| ibm02 | 1.6974 | 0.080 | 0.902 | 2.334 | 66.76s | BETTER (1.9072) |
+| ibm03 | 1.7582 | 0.079 | 1.129 | 2.230 | 91.24s | WORSE (1.7401) |
+| ibm04 | 1.4279 | 0.070 | 0.801 | 1.914 | 107.16s | BETTER (1.5037) |
+| ibm06 | 2.0281 | 0.063 | 1.041 | 2.889 | 69.52s | BETTER (2.5057) |
+| ibm07 | 1.6603 | 0.065 | 0.975 | 2.216 | 112.88s | BETTER (2.0229) |
+| ibm08 | 1.6859 | 0.068 | 0.943 | 2.292 | 140.93s | BETTER (1.9239) |
+| ibm09 | 1.1986 | 0.058 | 0.893 | 1.388 | 109.42s | BETTER (1.3875) |
+| ibm10 | 1.6453 | 0.058 | 0.917 | 2.258 | 331.76s | BETTER (2.1108) |
+| ibm11 | 1.3709 | 0.055 | 0.991 | 1.642 | 138.93s | BETTER (1.7111) |
+| ibm12 | 1.9361 | 0.063 | 0.976 | 2.769 | 248.14s | BETTER (2.8261) |
+| ibm13 | 1.5649 | 0.054 | 1.018 | 2.004 | 65.76s | BETTER (1.9141) |
+| ibm14 | 1.6528 | 0.051 | 0.975 | 2.228 | 144.81s | BETTER (2.2750) |
+| ibm15 | 1.7820 | 0.058 | 1.074 | 2.375 | 111.23s | BETTER (2.3000) |
+| ibm16 | 1.6646 | 0.049 | 0.934 | 2.297 | 153.31s | BETTER (2.2337) |
+| ibm17 | 1.7720 | 0.053 | 0.954 | 2.485 | 210.96s | BETTER (3.6726) |
+| ibm18 | 1.8005 | 0.053 | 1.042 | 2.453 | 110.45s | BETTER (2.7755) |
+| **AVG** | **1.6353** | | | | 2275.30s | **SA: 2.1251** |
+
+Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
+**Improvement over v2: 1.6282 -> 1.6353 (+0.4%) — slight regression.**
+Density scores improved across the board (many now below 1.0), but congestion remains the bottleneck.
+The research-paper improvements helped density but didn't yet translate to overall proxy gain.
+Notable improvements: ibm04 (1.4569→1.4279), ibm11 (1.3852→1.3709).
+Notable regressions: ibm12 (1.9648→1.9361 better), ibm06 still worst (2.0281).
+Now beats SA on 16/17 (was 15/17) — ibm03 is the only loss.
