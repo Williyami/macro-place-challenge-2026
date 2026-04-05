@@ -441,7 +441,7 @@ class AnalyticalPlacer(BasePlacer):
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
         num_candidates: int = 4,
-        sa_polish_iters: int = 25_000,
+        sa_polish_iters: int = 80_000,
     ):
         self.seed = seed
         self.iters = iters
