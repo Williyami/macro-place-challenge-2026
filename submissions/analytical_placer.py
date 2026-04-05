@@ -6,14 +6,18 @@ Approach:
   - Differentiable Gaussian density penalty (smooth spreading)
   - Differentiable overlap penalty (increasing weight schedule)
   - Differentiable congestion proxy (net bounding-box routing demand)
+  - Quadratic placement initialization from net connectivity
+  - Progressive density weight ramping (RePlAce-style)
   - Adam optimizer with cosine-annealed LR and projection to canvas bounds
   - Legalization post-processing (minimum displacement, reused from sa_placer)
+  - SA polish after legalization for local refinement
 
 Usage:
     PLACER_METHOD=analytical uv run evaluate submissions/placer.py --all
 """
 
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -29,7 +33,10 @@ if _PROJECT_ROOT not in sys.path:
 from macro_place.benchmark import Benchmark
 from macro_place.objective import compute_proxy_cost
 from submissions.base import BasePlacer
-from submissions.sa_placer import _load_plc, _extract_nets, _legalize
+from submissions.sa_placer import (
+    _load_plc, _extract_nets, _legalize, _sa_refine,
+    _compute_total_hpwl,
+)
 
 
 # ── Net tensor construction ────────────────────────────────────────────────
@@ -318,6 +325,99 @@ def _boundary_whitespace_penalty(pos, sizes, movable_mask, cw, ch):
     return (area_norm * (edge_dist / max(cw, ch)).pow(2)).mean()
 
 
+# ── Quadratic placement initialization ────────────────────────────────────
+
+def _quadratic_init(nets, n_hard, movable_mask, fixed_pos_np, cw, ch):
+    """
+    Compute initial positions by solving the quadratic placement problem.
+
+    Builds a weighted Laplacian from net connectivity (clique model) and
+    solves Lx = bx, Ly = by where fixed nodes contribute to the RHS.
+    Falls back to center-of-canvas if the system is singular.
+    """
+    movable_idx = np.where(movable_mask)[0]
+    fixed_idx = np.where(~movable_mask)[0]
+    n_mov = len(movable_idx)
+
+    if n_mov == 0:
+        return fixed_pos_np.copy()
+
+    # Map original index -> movable index (-1 if fixed)
+    mov_map = np.full(n_hard, -1, dtype=np.int64)
+    for new_i, old_i in enumerate(movable_idx):
+        mov_map[old_i] = new_i
+
+    # Build Laplacian and RHS
+    L = np.zeros((n_mov, n_mov))
+    bx = np.zeros(n_mov)
+    by = np.zeros(n_mov)
+
+    INF = float("inf")
+
+    for net in nets:
+        idx = net["hard_idx"]
+        w = net["weight"]
+        # Clique model: weight / (num_pins - 1)
+        has_fixed = net["fxmin"] != INF
+        n_pins = len(idx) + (1 if has_fixed else 0)
+        if n_pins < 2:
+            continue
+        clique_w = w / (n_pins - 1)
+
+        mov_in_net = []
+        for k in idx:
+            mi = mov_map[k]
+            if mi >= 0:
+                mov_in_net.append((mi, k))
+
+        # Movable-movable connections
+        for a_i in range(len(mov_in_net)):
+            ma, _ = mov_in_net[a_i]
+            for b_i in range(a_i + 1, len(mov_in_net)):
+                mb, _ = mov_in_net[b_i]
+                L[ma, mb] -= clique_w
+                L[mb, ma] -= clique_w
+                L[ma, ma] += clique_w
+                L[mb, mb] += clique_w
+
+        # Movable-fixed connections
+        for mi, orig_i in mov_in_net:
+            for k in idx:
+                if mov_map[k] < 0:  # fixed hard macro
+                    L[mi, mi] += clique_w
+                    bx[mi] += clique_w * fixed_pos_np[k, 0]
+                    by[mi] += clique_w * fixed_pos_np[k, 1]
+
+            if has_fixed:
+                # Fixed pin bounding box center
+                fx = (net["fxmin"] + net["fxmax"]) / 2
+                fy = (net["fymin"] + net["fymax"]) / 2
+                L[mi, mi] += clique_w
+                bx[mi] += clique_w * fx
+                by[mi] += clique_w * fy
+
+    # Add small anchor to canvas center for numerical stability
+    anchor_w = np.max(np.diag(L)) * 0.001 + 1e-6
+    for i in range(n_mov):
+        L[i, i] += anchor_w
+        bx[i] += anchor_w * cw / 2
+        by[i] += anchor_w * ch / 2
+
+    try:
+        sol_x = np.linalg.solve(L, bx)
+        sol_y = np.linalg.solve(L, by)
+    except np.linalg.LinAlgError:
+        sol_x = np.full(n_mov, cw / 2)
+        sol_y = np.full(n_mov, ch / 2)
+
+    result = fixed_pos_np.copy()
+    for new_i, old_i in enumerate(movable_idx):
+        result[old_i, 0] = np.clip(sol_x[new_i], 0, cw)
+        result[old_i, 1] = np.clip(sol_y[new_i], 0, ch)
+
+    return result
+
+
 # ── Placer class ───────────────────────────────────────────────────────────
 
 class AnalyticalPlacer(BasePlacer):
@@ -340,7 +440,8 @@ class AnalyticalPlacer(BasePlacer):
         boundary_weight: float = 0.02,
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
-        num_candidates: int = 3,
+        num_candidates: int = 4,
+        sa_polish_iters: int = 25_000,
     ):
         self.seed = seed
         self.iters = iters
@@ -353,6 +454,7 @@ class AnalyticalPlacer(BasePlacer):
         self.overlap_weight_start = overlap_weight_start
         self.overlap_weight_end = overlap_weight_end
         self.num_candidates = num_candidates
+        self.sa_polish_iters = sa_polish_iters
 
     def _optimize_candidate(
         self,
@@ -386,8 +488,8 @@ class AnalyticalPlacer(BasePlacer):
         pos = init_pos.clone()
         movable_idx = torch.where(movable_t)[0]
         if len(movable_idx) > 0:
-            noise_x = 0.03 * cw * (torch.rand(len(movable_idx)) - 0.5)
-            noise_y = 0.03 * ch * (torch.rand(len(movable_idx)) - 0.5)
+            noise_x = 0.02 * cw * (torch.rand(len(movable_idx)) - 0.5)
+            noise_y = 0.02 * ch * (torch.rand(len(movable_idx)) - 0.5)
             pos[movable_idx, 0] += noise_x
             pos[movable_idx, 1] += noise_y
 
@@ -417,16 +519,20 @@ class AnalyticalPlacer(BasePlacer):
                 self.overlap_weight_end / max(self.overlap_weight_start, 1e-12)
             ) ** frac
 
+            # Progressive density weight: start at 0.1x, ramp to full
+            # (RePlAce-style penalty schedule for better convergence)
+            density_ramp = 0.1 + 0.9 * min(1.0, frac * 2.5)
+            eff_density_weight = density_weight * density_ramp
+
             loss = torch.tensor(0.0)
             if net_data is not None:
                 loss = loss + _lse_hpwl(pos_param, net_data, gamma=gamma)
 
-            loss = loss + density_weight * _density_penalty(
+            loss = loss + eff_density_weight * _density_penalty(
                 pos_param, inflated_sizes_t, movable_t, cw, ch, target_scale=target_scale
             )
 
             if net_data is not None and congestion_weight > 0:
-                # Use halo-inflated geometry to better reflect macro-area-driven hotspots.
                 loss = loss + congestion_weight * _congestion_penalty(
                     pos_param, net_data, cw, ch
                 )
@@ -444,6 +550,8 @@ class AnalyticalPlacer(BasePlacer):
 
             if pos_param.grad is not None:
                 pos_param.grad[fixed_mask] = 0.0
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_([pos_param], max_norm=max(cw, ch) * 2)
 
             optimizer.step()
             scheduler.step()
@@ -497,40 +605,58 @@ class AnalyticalPlacer(BasePlacer):
         # Load nets via PlacementCost
         plc = _load_plc(benchmark.name)
         if plc is not None:
-            nets, _ = _extract_nets(benchmark, plc)
+            nets, macro_to_nets = _extract_nets(benchmark, plc)
         else:
             nets = []
+            macro_to_nets = [[] for _ in range(n_hard)]
 
         net_data = _build_net_tensors(nets) if nets else None
 
-        # Initialise positions from initial.plc
-        pos = benchmark.macro_positions[:n_hard].clone().float()
-        fixed_pos = pos[fixed_mask].clone()
+        # Initialise: try quadratic placement from connectivity, fall back to initial.plc
+        initial_pos = benchmark.macro_positions[:n_hard].clone().float()
+        fixed_pos = initial_pos[fixed_mask].clone()
+
+        if nets:
+            quad_pos_np = _quadratic_init(
+                nets, n_hard, movable_np,
+                initial_pos.numpy().astype(np.float64), cw, ch,
+            )
+            quad_pos = torch.tensor(quad_pos_np, dtype=torch.float32)
+        else:
+            quad_pos = initial_pos.clone()
+
+        # Per-candidate iteration budget: more iters than before
+        per_candidate_iters = max(1500, self.iters // 2)
 
         candidate_settings = [
-            # Baseline-like
-            dict(density=self.density_weight, congestion=self.congestion_weight,
-                 boundary=self.boundary_weight * 0.5, halo_area=0.08, halo_base=0.02,
-                 target_scale=1.40, iters=max(800, self.iters // 3)),
-            # Congestion / channel preserving
-            dict(density=self.density_weight * 1.6, congestion=self.congestion_weight * 2.2,
-                 boundary=self.boundary_weight, halo_area=0.14, halo_base=0.04,
-                 target_scale=1.25, iters=max(800, self.iters // 3)),
-            # Balanced
-            dict(density=self.density_weight * 1.2, congestion=self.congestion_weight * 1.5,
-                 boundary=self.boundary_weight * 0.75, halo_area=0.11, halo_base=0.03,
-                 target_scale=1.30, iters=max(800, self.iters // 3)),
+            # Quadratic init — wirelength-focused with moderate spreading
+            dict(density=self.density_weight * 1.0, congestion=self.congestion_weight * 1.2,
+                 boundary=self.boundary_weight * 0.3, halo_area=0.10, halo_base=0.03,
+                 target_scale=1.35, iters=per_candidate_iters, init=quad_pos),
+            # Quadratic init — strong density/congestion spreading
+            dict(density=self.density_weight * 2.5, congestion=self.congestion_weight * 3.0,
+                 boundary=self.boundary_weight * 0.5, halo_area=0.16, halo_base=0.05,
+                 target_scale=1.15, iters=per_candidate_iters, init=quad_pos),
+            # Initial.plc init — balanced
+            dict(density=self.density_weight * 1.5, congestion=self.congestion_weight * 2.0,
+                 boundary=self.boundary_weight * 0.5, halo_area=0.12, halo_base=0.04,
+                 target_scale=1.25, iters=per_candidate_iters, init=initial_pos),
+            # Quadratic init — aggressive spreading for congestion
+            dict(density=self.density_weight * 4.0, congestion=self.congestion_weight * 4.0,
+                 boundary=self.boundary_weight * 0.8, halo_area=0.18, halo_base=0.06,
+                 target_scale=1.10, iters=per_candidate_iters, init=quad_pos),
         ][: max(1, self.num_candidates)]
 
         best_full = None
         best_score = float("inf")
+        best_legal_pos = None
         fallback_full = None
 
         for idx, cfg in enumerate(candidate_settings):
-            _, full_pos, score = self._optimize_candidate(
+            legal_pos, full_pos, score = self._optimize_candidate(
                 benchmark, plc, net_data, sizes_t, movable_t, fixed_mask,
                 sizes_np, movable_np, half_w, half_h, cw, ch, n_hard,
-                pos, fixed_pos,
+                cfg["init"], fixed_pos,
                 density_weight=cfg["density"],
                 congestion_weight=cfg["congestion"],
                 boundary_weight=cfg["boundary"],
@@ -545,5 +671,66 @@ class AnalyticalPlacer(BasePlacer):
             if score is not None and score < best_score:
                 best_score = score
                 best_full = full_pos
+                best_legal_pos = legal_pos
 
-        return best_full if best_full is not None else fallback_full
+        if best_full is None:
+            return fallback_full
+
+        # SA polish: short SA refinement starting from the best analytical solution
+        if nets and self.sa_polish_iters > 0 and best_legal_pos is not None:
+            sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
+            sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
+
+            # Build neighbor adjacency for SA moves
+            neighbors = [[] for _ in range(n_hard)]
+            for net in nets:
+                nidx = net["hard_idx"]
+                for a in nidx:
+                    for b in nidx:
+                        if a != b:
+                            neighbors[a].append(int(b))
+
+            # Density weight calibration (same as SA placer)
+            grid_col = grid_row = 0
+            density_w = 0.0
+            if plc is not None:
+                try:
+                    grid_col, grid_row = plc.grid_col, plc.grid_row
+                    if grid_col > 0 and grid_row > 0:
+                        from macro_place.objective import _set_placement
+                        _set_placement(plc, best_full, benchmark)
+                        wl_norm = plc.get_cost()
+                        raw_hpwl = _compute_total_hpwl(best_legal_pos, nets)
+                        if wl_norm > 1e-10 and raw_hpwl > 1e-10:
+                            density_w = 0.5 * raw_hpwl / wl_norm
+                except Exception:
+                    grid_col = grid_row = 0
+                    density_w = 0.0
+
+            polished_pos = _sa_refine(
+                best_legal_pos, nets, macro_to_nets, neighbors,
+                movable_np, sizes_np, half_w, half_h, sep_x, sep_y,
+                cw, ch,
+                max_iters=self.sa_polish_iters,
+                seed=self.seed + 7777,
+                t_start_factor=0.06,
+                t_end_factor=0.0005,
+                density_weight=density_w,
+                grid_col=grid_col,
+                grid_row=grid_row,
+                benchmark=benchmark,
+            )
+
+            polished_full = benchmark.macro_positions.clone()
+            polished_full[:n_hard] = torch.tensor(polished_pos, dtype=torch.float32)
+
+            # Keep polished result only if it actually improves proxy cost
+            if plc is not None:
+                try:
+                    polished_costs = compute_proxy_cost(polished_full, benchmark, plc)
+                    if polished_costs["proxy_cost"] < best_score:
+                        best_full = polished_full
+                except Exception:
+                    pass
+
+        return best_full
