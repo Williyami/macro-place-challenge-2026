@@ -226,6 +226,10 @@ def augment_data(data: dict, transform: int) -> dict:
     aug["half_h"] = sizes_new[:, 1] / 2
     aug["cw"] = new_cw
     aug["ch"] = new_ch
+    # Swap grid dimensions for rotation transforms
+    if rotate:
+        aug["grid_col"] = data.get("grid_row", 10)
+        aug["grid_row"] = data.get("grid_col", 10)
     # Net batches and adjacency don't change with spatial transforms
     return aug
 

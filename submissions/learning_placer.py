@@ -324,21 +324,20 @@ def _rudy_congestion_proxy(pos: torch.Tensor, sizes: torch.Tensor,
         m_oy = F.relu(torch.min(macro_t.unsqueeze(1), gy_t.unsqueeze(0))
                       - torch.max(macro_b.unsqueeze(1), gy_b.unsqueeze(0)))
 
-        # H macro blockage: y_overlap * hrouting_alloc per cell
-        # V macro blockage: x_overlap * vrouting_alloc per cell
-        # [N, grid_row, grid_col]
-        h_macro_cong = (m_oy.unsqueeze(2) * hrouting_alloc) * \
-                       (m_ox.unsqueeze(1) > 0).float()
-        v_macro_cong = (m_ox.unsqueeze(1) * vrouting_alloc).unsqueeze(1).squeeze(1) * \
-                       (m_oy.unsqueeze(2) > 0).float()
+        # Evaluator: V_macro[cell] += x_dist * vrouting_alloc where overlap exists
+        #            H_macro[cell] += y_dist * hrouting_alloc where overlap exists
+        # Vectorized: [N, grid_row, grid_col] — use soft overlap (no hard threshold)
+        # m_ox: [N, grid_col], m_oy: [N, grid_row]
+        # For differentiability, use product of overlaps as soft mask
+        overlap_mask = m_oy.unsqueeze(2) * m_ox.unsqueeze(1)  # [N, grid_row, grid_col]
+        overlap_exists = (overlap_mask > 0).float()
 
-        # Simpler: for each cell, macro blockage = overlap_exists * alloc * overlap_dim
-        # Actually the evaluator does: V_macro += x_dist * vrouting_alloc per overlapping cell
-        # and H_macro += y_dist * hrouting_alloc per overlapping cell
-        for i in range(pos.shape[0]):
-            cell_mask = (m_ox[i].unsqueeze(0) > 0) & (m_oy[i].unsqueeze(1) > 0)  # [grid_row, grid_col]
-            v_cong = v_cong + cell_mask.float() * m_ox[i].unsqueeze(0) * vrouting_alloc
-            h_cong = h_cong + cell_mask.float() * m_oy[i].unsqueeze(1) * hrouting_alloc
+        # V macro congestion: x_dist * vrouting_alloc per cell where both dims overlap
+        v_macro = (m_ox.unsqueeze(1) * overlap_exists * vrouting_alloc).sum(0)
+        h_macro = (m_oy.unsqueeze(2) * overlap_exists * hrouting_alloc).sum(0)
+
+        v_cong = v_cong + v_macro
+        h_cong = h_cong + h_macro
 
     # ── 3. Normalize by routing capacity ───────────────────────────────
     h_cong_norm = h_cong / grid_h_routes
