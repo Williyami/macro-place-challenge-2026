@@ -120,14 +120,14 @@ def _lse_hpwl(pos: torch.Tensor, net_batches: list,
 
 def _smooth_density_penalty(pos: torch.Tensor, sizes: torch.Tensor,
                             cw: float, ch: float,
-                            grid_n: int = 16,
+                            grid_col: int = 16, grid_row: int = 16,
                             target_util: float = 0.6) -> torch.Tensor:
     """
     Density penalty with top-10% congestion proxy.
     Uses bell-shaped overlap computation for smoother gradients.
     """
-    cell_w = cw / grid_n
-    cell_h = ch / grid_n
+    cell_w = cw / grid_col
+    cell_h = ch / grid_row
     cell_area = cell_w * cell_h
 
     half_w = sizes[:, 0] / 2
@@ -138,8 +138,8 @@ def _smooth_density_penalty(pos: torch.Tensor, sizes: torch.Tensor,
     macro_b = pos[:, 1] - half_h
     macro_t = pos[:, 1] + half_h
 
-    gx = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_w + cell_w / 2
-    gy = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_h + cell_h / 2
+    gx = torch.arange(grid_col, device=pos.device, dtype=pos.dtype) * cell_w + cell_w / 2
+    gy = torch.arange(grid_row, device=pos.device, dtype=pos.dtype) * cell_h + cell_h / 2
 
     grid_l = gx - cell_w / 2
     grid_r = gx + cell_w / 2
@@ -498,14 +498,14 @@ class LearningPlacer(BasePlacer):
     """
 
     def __init__(self, seed: int = 42,
-                 gnn_finetune_epochs: int = 100,
-                 refine_epochs: int = 300,
+                 gnn_finetune_epochs: int = 400,
+                 refine_epochs: int = 800,
                  gnn_lr: float = 1e-3,
                  refine_lr: float = 3.0,
                  gamma_start: float = 50.0,
                  gamma_end: float = 2.0,
-                 sa_iters: int = 100_000,
-                 num_starts: int = 3,
+                 sa_iters: int = 500_000,
+                 num_starts: int = 5,
                  weights_path: str = None):
         self.seed = seed
         self.gnn_finetune_epochs = gnn_finetune_epochs
@@ -584,10 +584,11 @@ class LearningPlacer(BasePlacer):
 
             loss_wl = _lse_hpwl(pos, net_batches, gamma)
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
-                                                grid_n=16, target_util=0.5) * (cw * ch) * 0.02
+                                                grid_col=grid_col, grid_row=grid_row,
+                                                target_util=0.5) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * (0.1 + 0.5 * frac)
-            # RUDY-based congestion (matches evaluator)
-            cong_weight = 0.5 * (0.01 + 0.04 * frac)
+            # RUDY-based congestion — weight ramped to match proxy formula (0.5 * congestion)
+            cong_weight = 0.1 + 0.4 * frac
             loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
             loss = loss_wl + loss_den + loss_ov + loss_cong
@@ -603,8 +604,14 @@ class LearningPlacer(BasePlacer):
             if fixed_mask.any():
                 init_pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, init_pos)
 
-        # ── Phase 2: Gradient refinement ────────────────────────────────
+        # ── Phase 2: Two-stage gradient refinement ───────────────────────
+        # Stage 1: WL + overlap focused (get a legal, low-WL placement)
+        # Stage 2: Congestion-focused (redistribute to reduce hotspots)
         pos_param = init_pos.clone().detach().requires_grad_(True)
+
+        stage1_epochs = self.refine_epochs * 2 // 5  # 40% for WL+overlap
+        stage2_epochs = self.refine_epochs - stage1_epochs  # 60% for congestion
+
         refine_opt = torch.optim.Adam([pos_param], lr=self.refine_lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             refine_opt, T_max=self.refine_epochs, eta_min=0.05
@@ -614,6 +621,12 @@ class LearningPlacer(BasePlacer):
         best_cost = float('inf')
 
         for epoch in range(self.refine_epochs):
+            in_stage2 = epoch >= stage1_epochs
+            if in_stage2:
+                stage_frac = (epoch - stage1_epochs) / max(stage2_epochs, 1)
+            else:
+                stage_frac = epoch / max(stage1_epochs, 1)
+
             frac = epoch / max(self.refine_epochs, 1)
             gamma = self.gamma_start * (self.gamma_end / self.gamma_start) ** frac
             ov_weight = 0.1 + 5.0 * frac  # stronger overlap ramp
@@ -629,19 +642,27 @@ class LearningPlacer(BasePlacer):
                 pos = torch.where(fixed_mask.unsqueeze(1), orig_pos, pos)
 
             loss_wl = _lse_hpwl(pos, net_batches, gamma)
-            den_weight = 0.03 + 0.07 * frac
+
+            if in_stage2:
+                # Stage 2: high congestion + density weight, maintain WL
+                den_weight = 0.08 + 0.12 * stage_frac
+                cong_weight = 0.5 + 0.5 * stage_frac  # up to 1.0
+            else:
+                # Stage 1: low congestion, focus on WL + overlap
+                den_weight = 0.03 + 0.05 * stage_frac
+                cong_weight = 0.1 + 0.15 * stage_frac  # up to 0.25
+
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
-                                                grid_n=16, target_util=0.5) * (cw * ch) * den_weight
+                                                grid_col=grid_col, grid_row=grid_row,
+                                                target_util=0.5) * (cw * ch) * den_weight
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
-            # RUDY-based congestion (matches evaluator)
-            cong_weight = 0.5 * (0.02 + 0.08 * frac)
             loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
             loss = loss_wl + loss_den + loss_ov + loss_cong
 
             with torch.no_grad():
                 ov_area = _smooth_overlap_penalty(pos, sizes, movable).item()
-                cost = loss_wl.item()
+                cost = loss_wl.item() + loss_cong.item()  # track WL + congestion
                 if ov_area < 1.0 and cost < best_cost:
                     best_cost = cost
                     best_pos = pos.detach().clone()

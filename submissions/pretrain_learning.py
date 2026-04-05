@@ -298,9 +298,11 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
     # Global HPWL loss
     loss_wl = _lse_hpwl(pos, data["net_batches"], gamma)
 
-    # Density loss
+    # Density loss (use actual evaluator grid dims)
     loss_den = _smooth_density_penalty(
-        pos, sizes, cw, ch, grid_n=16, target_util=0.5
+        pos, sizes, cw, ch,
+        grid_col=data.get("grid_col", 16), grid_row=data.get("grid_row", 16),
+        target_util=0.5
     ) * (cw * ch) * (0.01 + 0.04 * frac)
 
     # Overlap loss
@@ -312,7 +314,7 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
 
     # RUDY-based congestion loss (matches actual evaluator metric)
     if use_congestion:
-        cong_weight = 0.5 * (0.01 + 0.04 * frac)
+        cong_weight = 0.1 + 0.4 * frac
         loss_cong = _rudy_congestion_proxy(
             pos, sizes,
             net_batches=data["net_batches"],
