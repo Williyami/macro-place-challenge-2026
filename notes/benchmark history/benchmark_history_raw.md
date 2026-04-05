@@ -12,8 +12,10 @@ Generated from the note files in this directory.
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | 2026-04-05 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4844 | 1.4844 | 503.00 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | 2026-04-03 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7310 | 1.7310 | 406.00 | (SA + Analytical method) Omnellnotes.md |
 | A2 | Analytical Placer | 2026-04-04 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7394 | 1.7394 | 598.68 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | 2026-04-05 | Analytical Placer v3 (PLACER_METHOD=analytical) | full_suite | 17 | 1.7232 | 1.7232 | 1362.00 | (SA + Analytical method) Omnellnotes.md |
 | H1 | HybridPlacer | 2026-04-03 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6972 | 1.6972 | 1492.67 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
 
@@ -123,6 +125,23 @@ Generated from the note files in this directory.
 | S3 | SA Placer | ibm16 | 1.5238 | 0.048 | 0.848 | 2.116 | 70.92 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | ibm17 | 1.7495 | 0.053 | 0.941 | 2.452 | 97.50 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | ibm18 | 1.7872 | 0.053 | 1.034 | 2.434 | 49.45 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm01 | 1.1362 | 0.069 | 0.827 | 1.307 | 20.97 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm02 | 1.5992 | 0.076 | 0.728 | 2.319 | 12.81 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm03 | 1.3935 | 0.079 | 0.769 | 1.860 | 12.87 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm04 | 1.3954 | 0.072 | 0.812 | 1.834 | 15.81 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm06 | 1.6926 | 0.063 | 0.709 | 2.550 | 12.78 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm07 | 1.4801 | 0.065 | 0.808 | 2.022 | 18.14 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm08 | 1.5224 | 0.070 | 0.840 | 2.066 | 21.20 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm09 | 1.1088 | 0.058 | 0.820 | 1.283 | 17.91 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm10 | 1.3624 | 0.065 | 0.707 | 1.889 | 43.40 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm11 | 1.2390 | 0.055 | 0.847 | 1.520 | 22.32 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm12 | 1.6440 | 0.061 | 0.755 | 2.412 | 37.08 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm13 | 1.3908 | 0.054 | 0.875 | 1.799 | 23.51 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm14 | 1.5988 | 0.051 | 0.948 | 2.146 | 47.46 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm15 | 1.6034 | 0.058 | 0.917 | 2.173 | 34.65 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm16 | 1.5308 | 0.048 | 0.848 | 2.116 | 51.71 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm17 | 1.7504 | 0.053 | 0.941 | 2.454 | 79.25 | (SA + Analytical method) Omnellnotes.md |
+| S4 | SA Placer | ibm18 | 1.7877 | 0.053 | 1.034 | 2.435 | 30.88 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm01 | 1.3845 | 0.103 | 1.017 | 1.546 | 10.07 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm02 | 1.7839 | 0.089 | 0.920 | 2.470 | 7.40 | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | ibm03 | 1.6980 | 0.095 | 1.054 | 2.152 | 7.75 | (SA + Analytical method) Omnellnotes.md |
@@ -157,6 +176,23 @@ Generated from the note files in this directory.
 | A2 | Analytical Placer | ibm16 | 1.7438 | 0.051 | 1.044 | 2.342 | 47.24 | (SA + Analytical method) Omnellnotes.md |
 | A2 | Analytical Placer | ibm17 | 1.8249 | 0.056 | 1.014 | 2.524 | 47.09 | (SA + Analytical method) Omnellnotes.md |
 | A2 | Analytical Placer | ibm18 | 1.8287 | 0.055 | 1.097 | 2.451 | 8.65 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm01 | 1.3280 | 0.073 | 1.034 | 1.476 | 34.21 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm02 | 1.8140 | 0.079 | 0.988 | 2.482 | 31.83 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm03 | 1.7517 | 0.081 | 1.130 | 2.210 | 32.76 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm04 | 1.6324 | 0.070 | 1.049 | 2.075 | 62.14 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm06 | 2.0549 | 0.064 | 1.073 | 2.909 | 23.25 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm07 | 1.7149 | 0.065 | 1.105 | 2.194 | 37.87 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm08 | 1.8806 | 0.069 | 1.160 | 2.464 | 69.87 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm09 | 1.3377 | 0.058 | 1.059 | 1.501 | 32.39 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm10 | 1.6909 | 0.057 | 0.993 | 2.275 | 153.98 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm11 | 1.4683 | 0.054 | 1.125 | 1.703 | 51.43 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm12 | 1.9980 | 0.062 | 1.072 | 2.799 | 125.00 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm13 | 1.6787 | 0.053 | 1.132 | 2.119 | 63.68 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm14 | 1.7218 | 0.051 | 1.103 | 2.240 | 280.44 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm15 | 1.8235 | 0.058 | 1.135 | 2.397 | 67.47 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm16 | 1.7702 | 0.048 | 1.067 | 2.377 | 141.99 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm17 | 1.7936 | 0.053 | 1.009 | 2.473 | 119.90 | (SA + Analytical method) Omnellnotes.md |
+| A3 | Analytical Placer | ibm18 | 1.8347 | 0.053 | 1.109 | 2.454 | 33.59 | (SA + Analytical method) Omnellnotes.md |
 | H1 | HybridPlacer | ibm01 | 1.2458 | 0.066 | 1.038 | 1.322 | 61.00 | (Hybrid method)novaknotes.md |
 | H1 | HybridPlacer | ibm02 | 1.7708 | 0.080 | 0.989 | 2.393 | 75.00 | (Hybrid method)novaknotes.md |
 | H1 | HybridPlacer | ibm03 | 1.7771 | 0.079 | 1.140 | 2.257 | 57.00 | (Hybrid method)novaknotes.md |

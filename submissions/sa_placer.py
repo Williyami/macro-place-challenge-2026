@@ -802,6 +802,7 @@ class SAPlacer(BasePlacer):
         reheat_threshold: int = 0,
         reheat_factor: float = 3.0,
         per_benchmark_overrides=None,
+        analytical_warmstart: bool = False,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -815,6 +816,7 @@ class SAPlacer(BasePlacer):
         self.reheat_threshold = reheat_threshold
         self.reheat_factor = reheat_factor
         self.per_benchmark_overrides = per_benchmark_overrides or self.DEFAULT_OVERRIDES
+        self.analytical_warmstart = analytical_warmstart
         self.debug_snapshots = []
         self.debug_trace = []
 
@@ -873,6 +875,23 @@ class SAPlacer(BasePlacer):
         # Initialise from hand-crafted initial.plc positions + legalize
         init_pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
         init_pos = _legalize(init_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+
+        # Optionally warm-start from analytical placer output
+        if self.analytical_warmstart:
+            try:
+                from submissions.analytical_placer import AnalyticalPlacer
+                ap = AnalyticalPlacer(seed=self.seed, iters=3_000, lr=5.0,
+                                      density_weight=0.01, overlap_weight_end=20.0)
+                ap_result = ap.place(benchmark)
+                ap_pos = ap_result[:n_hard].numpy().astype(np.float64)
+                # Compare HPWL: use analytical only if it's better
+                if nets:
+                    ap_hpwl = _compute_total_hpwl(ap_pos, nets)
+                    init_hpwl = _compute_total_hpwl(init_pos, nets)
+                    if ap_hpwl < init_hpwl:
+                        init_pos = ap_pos
+            except Exception:
+                pass  # Fall back to default init
 
         def capture_snapshot(pos_hard: np.ndarray):
             if not self.capture_snapshots:

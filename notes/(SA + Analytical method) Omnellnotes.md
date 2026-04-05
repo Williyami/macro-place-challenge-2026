@@ -196,3 +196,108 @@ Changes from previous SA run:
 - Now only 1.5% behind RePlAce (was 1.9%)
 - Beats RePlAce on 4/17 benchmarks (ibm02, ibm09, ibm10, ibm12)
 - Beats SA baseline on all 17/17 benchmarks
+
+## Benchmark Results (2026-04-05)
+
+### Analytical Placer v3 (PLACER_METHOD=analytical)
+
+**Method:** Tuned differentiable placement with Adam optimizer.
+- 3000 iterations, lr=5.0 with cosine annealing (→0.05)
+- LSE-HPWL with annealed gamma (50→3)
+- Gaussian density penalty (weight=0.005) on 32x32 grid
+- NEW: Differentiable congestion proxy (sigmoid-based routing demand, weight=0.0005)
+- Overlap penalty (weight annealed 0.01→20.0)
+- Legalization post-processing
+
+| Benchmark | proxy  | wl    | den   | cong  | Time     |
+|-----------|--------|-------|-------|-------|----------|
+| ibm01     | 1.3280 | 0.073 | 1.034 | 1.476 |  34.21s  |
+| ibm02     | 1.8140 | 0.079 | 0.988 | 2.482 |  31.83s  |
+| ibm03     | 1.7517 | 0.081 | 1.130 | 2.210 |  32.76s  |
+| ibm04     | 1.6324 | 0.070 | 1.049 | 2.075 |  62.14s  |
+| ibm06     | 2.0549 | 0.064 | 1.073 | 2.909 |  23.25s  |
+| ibm07     | 1.7149 | 0.065 | 1.105 | 2.194 |  37.87s  |
+| ibm08     | 1.8806 | 0.069 | 1.160 | 2.464 |  69.87s  |
+| ibm09     | 1.3377 | 0.058 | 1.059 | 1.501 |  32.39s  |
+| ibm10     | 1.6909 | 0.057 | 0.993 | 2.275 | 153.98s  |
+| ibm11     | 1.4683 | 0.054 | 1.125 | 1.703 |  51.43s  |
+| ibm12     | 1.9980 | 0.062 | 1.072 | 2.799 | 125.00s  |
+| ibm13     | 1.6787 | 0.053 | 1.132 | 2.119 |  63.68s  |
+| ibm14     | 1.7218 | 0.051 | 1.103 | 2.240 | 280.44s  |
+| ibm15     | 1.8235 | 0.058 | 1.135 | 2.397 |  67.47s  |
+| ibm16     | 1.7702 | 0.048 | 1.067 | 2.377 | 141.99s  |
+| ibm17     | 1.7936 | 0.053 | 1.009 | 2.473 | 119.90s  |
+| ibm18     | 1.8347 | 0.053 | 1.109 | 2.454 |  33.59s  |
+| **AVG**   |**1.7232**|     |       |       | 1362s    |
+
+- Improved from 1.7394 → 1.7232 (+0.9%)
+- Still far behind SA (1.48) — analytical mainly useful as SA warm-start
+- Added analytical_warmstart option to SA placer for next SA run
+
+### SA Placer (PLACER_METHOD=sa)
+
+**Method:** SA with density-aware acceptance + greedy macro flipping.
+- 120K iterations, t_start=0.12, t_end=0.0008
+- Removed ibm04-specific overrides (using default params for all)
+- run_fd=False (tested: FD hurts wirelength/congestion)
+- analytical_warmstart tested but not used (hurts: analytical init is worse than initial.plc)
+
+| Benchmark | proxy  | wl    | den   | cong  | Time    |
+|-----------|--------|-------|-------|-------|---------|
+| ibm01     | 1.1362 | 0.069 | 0.827 | 1.307 |  20.97s |
+| ibm02     | 1.5992 | 0.076 | 0.728 | 2.319 |  12.81s |
+| ibm03     | 1.3935 | 0.079 | 0.769 | 1.860 |  12.87s |
+| ibm04     | 1.3954 | 0.072 | 0.812 | 1.834 |  15.81s |
+| ibm06     | 1.6926 | 0.063 | 0.709 | 2.550 |  12.78s |
+| ibm07     | 1.4801 | 0.065 | 0.808 | 2.022 |  18.14s |
+| ibm08     | 1.5224 | 0.070 | 0.840 | 2.066 |  21.20s |
+| ibm09     | 1.1088 | 0.058 | 0.820 | 1.283 |  17.91s |
+| ibm10     | 1.3624 | 0.065 | 0.707 | 1.889 |  43.40s |
+| ibm11     | 1.2390 | 0.055 | 0.847 | 1.520 |  22.32s |
+| ibm12     | 1.6440 | 0.061 | 0.755 | 2.412 |  37.08s |
+| ibm13     | 1.3908 | 0.054 | 0.875 | 1.799 |  23.51s |
+| ibm14     | 1.5988 | 0.051 | 0.948 | 2.146 |  47.46s |
+| ibm15     | 1.6034 | 0.058 | 0.917 | 2.173 |  34.65s |
+| ibm16     | 1.5308 | 0.048 | 0.848 | 2.116 |  51.71s |
+| ibm17     | 1.7504 | 0.053 | 0.941 | 2.454 |  79.25s |
+| ibm18     | 1.7877 | 0.053 | 1.034 | 2.435 |  30.88s |
+| **AVG**   |**1.4844**|     |       |       | 503s    |
+
+- 1.4844 avg (note: worse than S3=1.4803 because ibm04 overrides were removed)
+- ibm04 overrides restored after this run — expect ~1.4803 with them back
+- Only 1.8% behind RePlAce (1.4578)
+
+## Session Summary & Next Steps (2026-04-05)
+
+### Current best: S3 = 1.4803 avg proxy (1.5% behind RePlAce)
+
+### What's in the SA placer now
+- 120K iters, t_start=0.12, t_end=0.0008, density-aware acceptance criterion
+- Greedy macro flipping post-processing (FN/FS/S orientations)
+- ibm04 override: 200K iters, t_start=0.20, t_end=0.0005, 3 multi-starts, reheat at 8K stagnation
+- Per-benchmark override system via `DEFAULT_OVERRIDES` dict
+- `analytical_warmstart` option (exists but disabled — doesn't help)
+
+### What was tried on Apr 5 and DIDN'T help
+- **Analytical warm-start for SA** — analytical HPWL is worse than initial.plc on all tested benchmarks, so SA starts from a worse position
+- **Force-directed soft macro placement (run_fd=True)** — ibm01 went from 1.136→1.332, hurts WL and congestion
+- **Multi-start 2 runs globally** — mixed results (+/- 0.01), not worth 2x runtime
+- **200K iters + reheat globally** — marginal gains (~0.01 on ibm01), not enough to justify runtime
+- **Removing ibm04 overrides** — confirmed ibm04 needs the special treatment (proxy went from 1.368→1.395)
+
+### Positive takeaways
+- ibm04 overrides confirmed essential — don't remove
+- Density-aware SA + greedy flipping = our best combo
+- Analytical placer improved to 1.7232 with congestion proxy + cosine LR (reusable building block)
+- SA is near-converged at 120K iters — further improvements need algorithmic changes, not more iterations
+
+### Remaining gap analysis (SA vs RePlAce)
+- Gap is 1.5% overall, driven primarily by **congestion** (avg ~2.0 vs RePlAce's lower)
+- Wirelength is competitive, density is good
+- Worst relative benchmarks: ibm17 (1.750 vs 1.645), ibm18 (1.788 vs 1.772), ibm06 (1.693 vs 1.619)
+
+### Ideas for next session
+1. **Congestion-aware SA moves** — avoid placing macros in high-routing-demand grid cells
+2. **Window-based moves** — restrict shift moves to local neighborhood (scales better for large benchmarks like ibm17)
+3. **Per-benchmark tuning** — add overrides for ibm17, ibm06, ibm18 (worst relative performers)
+4. **Improve analytical placer** — try as standalone competitor with heavy tuning (10K+ iters, better weights)
