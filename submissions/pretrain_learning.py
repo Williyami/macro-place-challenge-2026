@@ -112,11 +112,10 @@ def _extract_training_data(name: str, benchmark: Benchmark):
     half_h = sizes[:, 1] / 2
     movable = benchmark.get_movable_mask()[:n_hard]
 
-    # Build per-macro net index lists for local HPWL
-    macro_net_indices = [[] for _ in range(n_hard)]
-    for net_idx, net in enumerate(nets_raw):
-        for mi in net["hard_idx"]:
-            macro_net_indices[int(mi)].append(net_idx)
+    # Pre-compute vectorized local HPWL tensors
+    local_net_indices, local_net_weights = _build_local_hpwl_tensors(
+        nets_raw, n_hard, torch.device("cpu")
+    )
 
     return {
         "name": name,
@@ -124,8 +123,8 @@ def _extract_training_data(name: str, benchmark: Benchmark):
         "cw": cw,
         "ch": ch,
         "net_batches": net_batches,
-        "nets_raw": nets_raw,
-        "macro_net_indices": macro_net_indices,
+        "local_net_indices": local_net_indices,
+        "local_net_weights": local_net_weights,
         "node_features": node_features,
         "adj_norm": adj_norm,
         "sizes": sizes,
@@ -265,38 +264,39 @@ def _congestion_loss(pos: torch.Tensor, sizes: torch.Tensor,
 
 # ── Per-macro local HPWL ───────────────────────────────────────────────────
 
-def _local_hpwl_loss(pos: torch.Tensor, nets_raw: list,
-                     macro_net_indices: list, n_hard: int,
-                     movable: torch.Tensor) -> torch.Tensor:
-    """
-    Per-macro local HPWL loss for denser gradient signal.
-
-    From HRLP paper: instead of only global HPWL, compute the HPWL
-    contribution of each macro's local nets. This gives each node
-    better gradient information about its own position quality.
-    """
-    local_costs = torch.zeros(n_hard, device=pos.device, dtype=pos.dtype)
-
-    for mi in range(n_hard):
-        if not movable[mi]:
+def _build_local_hpwl_tensors(nets_raw: list, n_hard: int, device: torch.device):
+    """Pre-compute tensors for vectorized local HPWL computation."""
+    # For each net with >=2 hard macro pins, store index tensor and weight
+    net_indices_list = []
+    net_weights_list = []
+    for net in nets_raw:
+        idx = net["hard_idx"]
+        if len(idx) < 2:
             continue
-        net_indices = macro_net_indices[mi]
-        if not net_indices:
-            continue
+        net_indices_list.append(torch.tensor(idx, dtype=torch.long, device=device))
+        net_weights_list.append(net["weight"])
+    return net_indices_list, net_weights_list
 
-        cost = torch.tensor(0.0, device=pos.device)
-        for ni in net_indices:
-            net = nets_raw[ni]
-            idx = net["hard_idx"]
-            if len(idx) < 2:
-                continue
-            px = pos[idx, 0]
-            py = pos[idx, 1]
-            cost = cost + (px.max() - px.min() + py.max() - py.min()) * net["weight"]
 
-        local_costs[mi] = cost
+def _local_hpwl_loss(pos: torch.Tensor, net_indices_list: list,
+                     net_weights_list: list) -> torch.Tensor:
+    """
+    Vectorized per-net HPWL loss for denser gradient signal.
 
-    return local_costs.mean()
+    From HRLP paper: computes sum of per-net HPWL spans. This is
+    mathematically equivalent to global HPWL but computed per-net,
+    giving each macro gradient signal proportional to its net membership.
+    """
+    if not net_indices_list:
+        return torch.tensor(0.0, device=pos.device)
+
+    total = torch.tensor(0.0, device=pos.device, dtype=pos.dtype)
+    for idx, w in zip(net_indices_list, net_weights_list):
+        px = pos[idx, 0]
+        py = pos[idx, 1]
+        total = total + (px.max() - px.min() + py.max() - py.min()) * w
+
+    return total / len(net_indices_list)
 
 
 # ── Training step ──────────────────────────────────────────────────────────
@@ -340,11 +340,10 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
         loss_cong = _congestion_loss(pos, sizes, cw, ch, grid_n=16) * (cw * ch) * (0.005 + 0.02 * frac)
         loss = loss + loss_cong
 
-    # Per-macro local HPWL loss (dense gradient signal from HRLP paper)
-    if use_local_hpwl and local_hpwl_weight > 0 and data.get("nets_raw"):
+    # Per-net local HPWL loss (dense gradient signal from HRLP paper)
+    if use_local_hpwl and local_hpwl_weight > 0 and data.get("local_net_indices"):
         loss_local = _local_hpwl_loss(
-            pos, data["nets_raw"], data["macro_net_indices"],
-            data["n_hard"], data["movable"]
+            pos, data["local_net_indices"], data["local_net_weights"]
         ) * local_hpwl_weight
         loss = loss + loss_local
 
