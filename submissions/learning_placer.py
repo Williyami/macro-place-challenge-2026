@@ -564,9 +564,32 @@ class LearningPlacer(BasePlacer):
             hrouting_alloc=halloc, vrouting_alloc=valloc,
         )
 
+        # Benchmark-specific density target from actual macro utilization
+        total_macro_area = (sizes[:, 0] * sizes[:, 1]).sum().item()
+        canvas_area = cw * ch
+        actual_util = total_macro_area / canvas_area
+        # Target slightly above actual to allow some slack
+        target_util = min(actual_util * 1.2, 0.85)
+
         # ── Phase 1: Load pre-trained GNN + fine-tune ───────────────────
         gnn = self._load_pretrained(in_dim)
         gnn_opt = torch.optim.Adam(gnn.parameters(), lr=self.gnn_lr)
+        # LR warmup: ramp from 10% to full over first 10% of epochs
+        warmup_epochs = max(1, self.gnn_finetune_epochs // 10)
+        gnn_scheduler = torch.optim.lr_scheduler.SequentialLR(
+            gnn_opt,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(gnn_opt, start_factor=0.1,
+                                                   total_iters=warmup_epochs),
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    gnn_opt, T_max=self.gnn_finetune_epochs - warmup_epochs,
+                    eta_min=1e-5),
+            ],
+            milestones=[warmup_epochs],
+        )
+
+        best_gnn_state = None
+        best_gnn_cost = float('inf')
 
         for epoch in range(self.gnn_finetune_epochs):
             frac = epoch / max(self.gnn_finetune_epochs, 1)
@@ -585,7 +608,7 @@ class LearningPlacer(BasePlacer):
             loss_wl = _lse_hpwl(pos, net_batches, gamma)
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_col=grid_col, grid_row=grid_row,
-                                                target_util=0.5) * (cw * ch) * 0.02
+                                                target_util=target_util) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * (0.1 + 0.5 * frac)
             # RUDY-based congestion — weight ramped to match proxy formula (0.5 * congestion)
             cong_weight = 0.1 + 0.4 * frac
@@ -595,6 +618,19 @@ class LearningPlacer(BasePlacer):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gnn.parameters(), 1.0)
             gnn_opt.step()
+            gnn_scheduler.step()
+
+            # Track best GNN checkpoint
+            with torch.no_grad():
+                ov = _smooth_overlap_penalty(pos, sizes, movable).item()
+                cost = loss_wl.item() + loss_cong.item()
+                if ov < 1.0 and cost < best_gnn_cost:
+                    best_gnn_cost = cost
+                    best_gnn_state = {k: v.clone() for k, v in gnn.state_dict().items()}
+
+        # Restore best GNN checkpoint
+        if best_gnn_state is not None:
+            gnn.load_state_dict(best_gnn_state)
 
         with torch.no_grad():
             raw_pos = gnn(node_features, adj_norm)
@@ -654,7 +690,7 @@ class LearningPlacer(BasePlacer):
 
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_col=grid_col, grid_row=grid_row,
-                                                target_util=0.5) * (cw * ch) * den_weight
+                                                target_util=target_util) * (cw * ch) * den_weight
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
             loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
@@ -732,6 +768,71 @@ class LearningPlacer(BasePlacer):
         hpwl = _compute_total_hpwl(legal_pos, nets_raw) if nets_raw else float('inf')
         return legal_pos, hpwl
 
+    def _run_from_initial(self, seed: int, benchmark: Benchmark,
+                          nets_raw: list, macro_to_nets: list,
+                          sizes: torch.Tensor, movable: torch.Tensor,
+                          orig_pos: torch.Tensor,
+                          cw: float, ch: float, n_hard: int,
+                          neighbors: list, plc) -> tuple:
+        """Run SA polish directly from initial.plc positions (no GNN)."""
+        import random as _random
+        _random.seed(seed)
+        np.random.seed(seed)
+
+        pos_np = orig_pos.numpy().astype(np.float64)
+        sizes_np = sizes.numpy().astype(np.float64)
+        half_w_np = sizes_np[:, 0] / 2
+        half_h_np = sizes_np[:, 1] / 2
+        movable_np = movable.numpy()
+        sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
+        sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
+
+        # Legalize first (initial.plc may have overlaps)
+        legal_pos = _legalize(
+            pos_np, movable_np, sizes_np, half_w_np, half_h_np,
+            cw, ch, n_hard, sep_x, sep_y,
+        )
+
+        # SA polish with more iterations (use full budget since no GNN time)
+        if nets_raw and self.sa_iters > 0:
+            grid_col = getattr(plc, 'grid_col', 0) if plc else 0
+            grid_row = getattr(plc, 'grid_row', 0) if plc else 0
+            density_w = 0.0
+            if plc is not None and grid_col > 0 and grid_row > 0:
+                try:
+                    from macro_place.objective import _set_placement
+                    full_init = benchmark.macro_positions.clone()
+                    full_init[:n_hard] = torch.tensor(legal_pos, dtype=torch.float32)
+                    _set_placement(plc, full_init, benchmark)
+                    wl_norm = plc.get_cost()
+                    raw_hpwl = _compute_total_hpwl(legal_pos, nets_raw)
+                    if wl_norm > 1e-10 and raw_hpwl > 1e-10:
+                        density_w = 0.5 * raw_hpwl / wl_norm
+                except Exception:
+                    grid_col = grid_row = 0
+                    density_w = 0.0
+
+            # Give this path extra SA iterations since it skips GNN
+            sa_iters_initial = int(self.sa_iters * 1.5)
+            legal_pos = _sa_refine(
+                legal_pos, nets_raw, macro_to_nets, neighbors,
+                movable_np, sizes_np, half_w_np, half_h_np,
+                sep_x, sep_y, cw, ch,
+                sa_iters_initial, seed,
+                t_start_factor=0.12,
+                t_end_factor=0.0008,
+                density_weight=density_w,
+                grid_col=grid_col,
+                grid_row=grid_row,
+                benchmark=benchmark,
+            )
+
+        if nets_raw:
+            _greedy_flip(legal_pos, nets_raw, macro_to_nets, movable_np, plc)
+
+        hpwl = _compute_total_hpwl(legal_pos, nets_raw) if nets_raw else float('inf')
+        return legal_pos, hpwl
+
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
@@ -765,6 +866,7 @@ class LearningPlacer(BasePlacer):
         best_pos = None
         best_hpwl = float('inf')
 
+        # GNN multi-starts
         for s in range(self.num_starts):
             seed = self.seed + s * 1000
             pos_np, hpwl = self._run_one_seed(
@@ -775,6 +877,15 @@ class LearningPlacer(BasePlacer):
             if hpwl < best_hpwl:
                 best_hpwl = hpwl
                 best_pos = pos_np
+
+        # Extra start from initial.plc (no GNN, just SA polish)
+        pos_np, hpwl = self._run_from_initial(
+            self.seed + 99000, benchmark, nets_raw, macro_to_nets,
+            sizes, movable, orig_pos, cw, ch, n_hard, neighbors, plc,
+        )
+        if hpwl < best_hpwl:
+            best_hpwl = hpwl
+            best_pos = pos_np
 
         full_pos = benchmark.macro_positions.clone()
         full_pos[:n_hard] = torch.tensor(best_pos, dtype=torch.float32)
