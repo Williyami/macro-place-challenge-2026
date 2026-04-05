@@ -196,46 +196,198 @@ def _smooth_overlap_penalty(pos: torch.Tensor, sizes: torch.Tensor,
     return (overlap_area * mask).sum() / 2
 
 
-# ── Congestion loss (aligns with proxy_cost scoring) ───────────────────────
+# ── RUDY-based routing congestion (matches evaluator) ─────────────────────
 
+def _rudy_congestion_proxy(pos: torch.Tensor, sizes: torch.Tensor,
+                           net_batches: list,
+                           cw: float, ch: float,
+                           grid_col: int = 10, grid_row: int = 10,
+                           hroutes_per_micron: float = 1.0,
+                           vroutes_per_micron: float = 1.0,
+                           hrouting_alloc: float = 0.0,
+                           vrouting_alloc: float = 0.0) -> torch.Tensor:
+    """
+    Differentiable RUDY-based routing congestion proxy.
+
+    Matches the actual PlacementCost evaluator which computes:
+      1. Per-net routing demand distributed across grid cells (RUDY)
+      2. Macro blockage of routing resources
+      3. Normalization by routes_per_micron
+      4. ABU-5% of combined H+V congestion
+
+    This is a differentiable approximation using soft bounding box overlap
+    (uniform RUDY distribution over each net's bounding box).
+    """
+    device = pos.device
+    dtype = pos.dtype
+
+    cell_w = cw / grid_col
+    cell_h = ch / grid_row
+
+    # Grid cell boundaries
+    gx_l = torch.arange(grid_col, device=device, dtype=dtype) * cell_w
+    gx_r = gx_l + cell_w
+    gy_b = torch.arange(grid_row, device=device, dtype=dtype) * cell_h
+    gy_t = gy_b + cell_h
+
+    # Routing capacity per grid cell
+    grid_h_routes = max(cell_h * hroutes_per_micron, 1e-6)
+    grid_v_routes = max(cell_w * vroutes_per_micron, 1e-6)
+
+    # Initialize H and V congestion grids: [grid_row, grid_col]
+    h_cong = torch.zeros(grid_row, grid_col, device=device, dtype=dtype)
+    v_cong = torch.zeros(grid_row, grid_col, device=device, dtype=dtype)
+
+    # ── 1. Net routing demand (RUDY approximation) ─────────────────────
+    # For each net, compute bounding box of all pins, then distribute
+    # routing demand uniformly across grid cells overlapping the bbox.
+    # RUDY: h_demand = weight / max(bbox_cols, 1), v_demand = weight / max(bbox_rows, 1)
+    for idx_batch, ox_batch, oy_batch, fb_batch, w_batch in net_batches:
+        B, P = idx_batch.shape
+        # Pin positions
+        px = pos[idx_batch, 0] + ox_batch  # [B, P]
+        py = pos[idx_batch, 1] + oy_batch  # [B, P]
+
+        # Include fixed pin contributions
+        has_fixed = fb_batch[:, 0] < 1e18
+        if has_fixed.any():
+            fx = fb_batch[:, :2]  # [B, 2] fxmin, fxmax
+            fy = fb_batch[:, 2:]  # [B, 2] fymin, fymax
+            fx_masked = torch.where(has_fixed.unsqueeze(1), fx,
+                                    px[:, :1].detach().expand_as(fx))
+            fy_masked = torch.where(has_fixed.unsqueeze(1), fy,
+                                    py[:, :1].detach().expand_as(fy))
+            px_full = torch.cat([px, fx_masked], dim=1)
+            py_full = torch.cat([py, fy_masked], dim=1)
+        else:
+            px_full = px
+            py_full = py
+
+        if px_full.shape[1] < 2:
+            continue
+
+        # Bounding box of each net: [B]
+        bbox_xmin = px_full.min(dim=1).values
+        bbox_xmax = px_full.max(dim=1).values
+        bbox_ymin = py_full.min(dim=1).values
+        bbox_ymax = py_full.max(dim=1).values
+
+        # Soft overlap of each net bbox with each grid cell
+        # Net bbox vs grid columns: [B, grid_col]
+        ox_min = torch.max(bbox_xmin.unsqueeze(1), gx_l.unsqueeze(0))
+        ox_max = torch.min(bbox_xmax.unsqueeze(1), gx_r.unsqueeze(0))
+        col_overlap = F.relu(ox_max - ox_min)  # [B, grid_col]
+
+        # Net bbox vs grid rows: [B, grid_row]
+        oy_min = torch.max(bbox_ymin.unsqueeze(1), gy_b.unsqueeze(0))
+        oy_max = torch.min(bbox_ymax.unsqueeze(1), gy_t.unsqueeze(0))
+        row_overlap = F.relu(oy_max - oy_min)  # [B, grid_row]
+
+        # RUDY demand: weight distributed over bbox area
+        bbox_w = (bbox_xmax - bbox_xmin).clamp(min=cell_w * 0.5)
+        bbox_h = (bbox_ymax - bbox_ymin).clamp(min=cell_h * 0.5)
+
+        # H routing demand per grid cell (horizontal wires, proportional to bbox width)
+        # Normalized by column span
+        h_demand = w_batch / bbox_h  # [B] — demand per unit height
+        # V routing demand per grid cell
+        v_demand = w_batch / bbox_w  # [B] — demand per unit width
+
+        # Distribute over grid: overlap_area gives how much of each cell is covered
+        # cell_overlap[B, grid_row, grid_col] = row_overlap * col_overlap
+        # H congestion: accumulate h_demand weighted by fractional overlap
+        h_contribution = (row_overlap / cell_h).unsqueeze(2) * \
+                         (col_overlap / cell_w).unsqueeze(1) * \
+                         h_demand.unsqueeze(1).unsqueeze(2)  # [B, grid_row, grid_col]
+        h_cong = h_cong + h_contribution.sum(0)
+
+        # V congestion
+        v_contribution = (row_overlap / cell_h).unsqueeze(2) * \
+                         (col_overlap / cell_w).unsqueeze(1) * \
+                         v_demand.unsqueeze(1).unsqueeze(2)  # [B, grid_row, grid_col]
+        v_cong = v_cong + v_contribution.sum(0)
+
+    # ── 2. Macro blockage ──────────────────────────────────────────────
+    # Hard macros block routing tracks (matches __macro_route_over_grid_cell)
+    if hrouting_alloc > 0 or vrouting_alloc > 0:
+        half_w = sizes[:, 0] / 2
+        half_h = sizes[:, 1] / 2
+        macro_l = pos[:, 0] - half_w
+        macro_r = pos[:, 0] + half_w
+        macro_b = pos[:, 1] - half_h
+        macro_t = pos[:, 1] + half_h
+
+        # Overlap of each macro with each grid column: [N, grid_col]
+        m_ox = F.relu(torch.min(macro_r.unsqueeze(1), gx_r.unsqueeze(0))
+                      - torch.max(macro_l.unsqueeze(1), gx_l.unsqueeze(0)))
+        # Overlap of each macro with each grid row: [N, grid_row]
+        m_oy = F.relu(torch.min(macro_t.unsqueeze(1), gy_t.unsqueeze(0))
+                      - torch.max(macro_b.unsqueeze(1), gy_b.unsqueeze(0)))
+
+        # H macro blockage: y_overlap * hrouting_alloc per cell
+        # V macro blockage: x_overlap * vrouting_alloc per cell
+        # [N, grid_row, grid_col]
+        h_macro_cong = (m_oy.unsqueeze(2) * hrouting_alloc) * \
+                       (m_ox.unsqueeze(1) > 0).float()
+        v_macro_cong = (m_ox.unsqueeze(1) * vrouting_alloc).unsqueeze(1).squeeze(1) * \
+                       (m_oy.unsqueeze(2) > 0).float()
+
+        # Simpler: for each cell, macro blockage = overlap_exists * alloc * overlap_dim
+        # Actually the evaluator does: V_macro += x_dist * vrouting_alloc per overlapping cell
+        # and H_macro += y_dist * hrouting_alloc per overlapping cell
+        for i in range(pos.shape[0]):
+            cell_mask = (m_ox[i].unsqueeze(0) > 0) & (m_oy[i].unsqueeze(1) > 0)  # [grid_row, grid_col]
+            v_cong = v_cong + cell_mask.float() * m_ox[i].unsqueeze(0) * vrouting_alloc
+            h_cong = h_cong + cell_mask.float() * m_oy[i].unsqueeze(1) * hrouting_alloc
+
+    # ── 3. Normalize by routing capacity ───────────────────────────────
+    h_cong_norm = h_cong / grid_h_routes
+    v_cong_norm = v_cong / grid_v_routes
+
+    # ── 4. Simple smoothing (average with neighbors) ───────────────────
+    # Matches __smooth_routing_cong: V smoothed horizontally, H smoothed vertically
+    if grid_col > 2:
+        pad_v = F.pad(v_cong_norm, (1, 1), mode='replicate')
+        v_cong_norm = (pad_v[:, :-2] + pad_v[:, 1:-1] + pad_v[:, 2:]) / 3.0
+    if grid_row > 2:
+        pad_h = F.pad(h_cong_norm.unsqueeze(0), (0, 0, 1, 1), mode='replicate').squeeze(0)
+        h_cong_norm = (pad_h[:-2, :] + pad_h[1:-1, :] + pad_h[2:, :]) / 3.0
+
+    # ── 5. Combined congestion + ABU-5% ────────────────────────────────
+    combined = (h_cong_norm + v_cong_norm).flatten()
+    k = max(1, int(0.05 * combined.numel()))
+    top_vals, _ = combined.topk(k)
+    abu5 = top_vals.mean()
+
+    return abu5
+
+
+# Legacy alias for backward compatibility during transition
 def _congestion_penalty(pos: torch.Tensor, sizes: torch.Tensor,
                         cw: float, ch: float,
                         grid_n: int = 16) -> torch.Tensor:
-    """
-    Differentiable congestion proxy matching the evaluation metric.
-
-    The actual scoring uses proxy_cost = WL + 0.5*density + 0.5*congestion.
-    This loss estimates routing congestion as the variance and peaks of
-    macro density across grid cells (from Synopsys congestion paper).
-    """
+    """Legacy density-based congestion proxy (kept for fallback)."""
     cell_w = cw / grid_n
     cell_h = ch / grid_n
     cell_area = cell_w * cell_h
-
     half_w = sizes[:, 0] / 2
     half_h = sizes[:, 1] / 2
-
     macro_l = pos[:, 0] - half_w
     macro_r = pos[:, 0] + half_w
     macro_b = pos[:, 1] - half_h
     macro_t = pos[:, 1] + half_h
-
     gx = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_w + cell_w / 2
     gy = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_h + cell_h / 2
-
     grid_l = gx - cell_w / 2
     grid_r = gx + cell_w / 2
     grid_b = gy - cell_h / 2
     grid_t = gy + cell_h / 2
-
     ox = F.relu(torch.min(macro_r.unsqueeze(1), grid_r.unsqueeze(0))
                 - torch.max(macro_l.unsqueeze(1), grid_l.unsqueeze(0)))
     oy = F.relu(torch.min(macro_t.unsqueeze(1), grid_t.unsqueeze(0))
                 - torch.max(macro_b.unsqueeze(1), grid_b.unsqueeze(0)))
-
     overlap = ox.unsqueeze(2) * oy.unsqueeze(1)
     density = overlap.sum(0) / cell_area
-
     cong_loss = density.var() + F.relu(density - 1.0).pow(2).mean()
     return cong_loss
 
@@ -398,6 +550,21 @@ class LearningPlacer(BasePlacer):
 
         in_dim = node_features.shape[1]
 
+        # Extract plc grid parameters for RUDY congestion proxy
+        grid_col = getattr(plc, 'grid_col', 10) if plc else 10
+        grid_row = getattr(plc, 'grid_row', 10) if plc else 10
+        hroutes = getattr(plc, 'hroutes_per_micron', 1.0) if plc else 1.0
+        vroutes = getattr(plc, 'vroutes_per_micron', 1.0) if plc else 1.0
+        halloc = getattr(plc, 'hrouting_alloc', 0.0) if plc else 0.0
+        valloc = getattr(plc, 'vrouting_alloc', 0.0) if plc else 0.0
+
+        rudy_kwargs = dict(
+            net_batches=net_batches, cw=cw, ch=ch,
+            grid_col=grid_col, grid_row=grid_row,
+            hroutes_per_micron=hroutes, vroutes_per_micron=vroutes,
+            hrouting_alloc=halloc, vrouting_alloc=valloc,
+        )
+
         # ── Phase 1: Load pre-trained GNN + fine-tune ───────────────────
         gnn = self._load_pretrained(in_dim)
         gnn_opt = torch.optim.Adam(gnn.parameters(), lr=self.gnn_lr)
@@ -420,8 +587,9 @@ class LearningPlacer(BasePlacer):
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_n=16, target_util=0.5) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * (0.1 + 0.5 * frac)
-            loss_cong = _congestion_penalty(pos, sizes, cw, ch,
-                                            grid_n=16) * (cw * ch) * (0.005 + 0.015 * frac)
+            # RUDY-based congestion (matches evaluator)
+            cong_weight = 0.5 * (0.01 + 0.04 * frac)
+            loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
             loss = loss_wl + loss_den + loss_ov + loss_cong
             loss.backward()
@@ -466,9 +634,9 @@ class LearningPlacer(BasePlacer):
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_n=16, target_util=0.5) * (cw * ch) * den_weight
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
-            cong_weight = 0.01 + 0.04 * frac
-            loss_cong = _congestion_penalty(pos, sizes, cw, ch,
-                                            grid_n=16) * (cw * ch) * cong_weight
+            # RUDY-based congestion (matches evaluator)
+            cong_weight = 0.5 * (0.02 + 0.08 * frac)
+            loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
             loss = loss_wl + loss_den + loss_ov + loss_cong
 
