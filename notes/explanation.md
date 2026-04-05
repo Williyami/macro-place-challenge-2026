@@ -29,26 +29,41 @@ The router in [placer.py](submissions/placer.py) already handles all five method
 
 ---
 
-## Pre-training the Learning Placer
+## Pre-training the Learning Placer (v2)
 
-The learning placer uses a GNN that can be pre-trained across all IBM benchmarks.
-Pre-trained weights are saved to `submissions/learning_weights/gnn_pretrained.pt`
-and tracked by git so teammates don't need to retrain.
+The learning placer uses a GNN pre-trained across all available benchmarks
+(17 IBM + 4 NanGate45 non-IBM). Pre-trained weights are saved to
+`submissions/learning_weights/gnn_pretrained.pt` and tracked by git.
+
+**v2 improvements (informed by research papers):**
+- Non-IBM benchmarks (ariane, nvdla, mempool) for better generalization
+- Data augmentation via flipping (from AutoDMP paper)
+- Congestion-aware loss matching actual proxy_cost scoring (from Synopsys paper)
+- Curriculum learning: small designs first (from HRLP paper)
+- Per-net local HPWL loss for denser gradient signal (from HRLP paper)
+- Prioritized training: more epochs on harder benchmarks (from MCTS+RL paper)
 
 **To retrain (if you change the GNN architecture or training):**
 
 ```bash
-uv run python submissions/pretrain_learning.py --epochs 150 --rounds 5
+uv run python submissions/pretrain_learning.py --epochs 50 --rounds 5 --augment-transforms 2
 ```
 
 Options:
 - `--epochs N` — training epochs per benchmark per round (default: 150)
 - `--rounds N` — round-robin passes over all benchmarks (default: 5)
+- `--augment-transforms N` — number of augmentation transforms 1-8 (default: 4)
 - `--lr F` — learning rate (default: 1e-3)
 - `--seed N` — random seed (default: 42)
+- `--no-augment` — disable data augmentation
+- `--no-congestion` — disable congestion loss
+- `--no-local-hpwl` — disable per-net local HPWL loss
+- `--no-non-ibm` — only train on IBM benchmarks
+- `--no-curriculum` — disable curriculum learning
+- `--no-prioritized` — disable prioritized training
 
-This takes ~5-10 min and produces `submissions/learning_weights/gnn_pretrained.pt`.
-The learning placer automatically loads these weights at evaluation time.
+Recommended: `--epochs 50 --rounds 5 --augment-transforms 2` (~30 min on CPU).
+Full training: `--epochs 150 --rounds 5 --augment-transforms 4` (~2-3 hours).
 
 **To evaluate after pre-training:**
 
