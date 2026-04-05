@@ -206,50 +206,112 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
     return (excess ** 2).sum()
 
 
-# ── Differentiable density penalty ────────────────────────────────────────
+# ── Differentiable density penalty (evaluator-matched) ───────────────────
 
 def _density_penalty(pos, sizes, movable_mask, cw, ch, grid_size=32, target_scale=1.35):
     """
-    Smooth density penalty using Gaussian spreading.
+    Bin-based density penalty matching the evaluator's computation.
+
+    Uses smooth bell-shaped (sigmoid) bin membership instead of Gaussian,
+    computing overlap area fractions per grid cell. Penalizes top 10%
+    densest cells (matching evaluator's density cost formula).
     """
     device = pos.device
     cell_w = cw / grid_size
     cell_h = ch / grid_size
+    grid_area = cell_w * cell_h
 
-    cx = torch.linspace(cell_w / 2, cw - cell_w / 2, grid_size, device=device)
-    cy = torch.linspace(cell_h / 2, ch - cell_h / 2, grid_size, device=device)
-
-    mov_idx = torch.where(movable_mask)[0]
-    if len(mov_idx) == 0:
+    # All macros contribute to density (not just movable)
+    n = pos.shape[0]
+    if n == 0:
         return torch.tensor(0.0, device=device)
 
-    mov_pos = pos[mov_idx]
-    mov_sizes = sizes[mov_idx]
+    # Grid cell boundaries
+    # For each cell j, the interval is [j*cell_w, (j+1)*cell_w]
+    bin_x_lo = torch.linspace(0, cw - cell_w, grid_size, device=device)
+    bin_x_hi = bin_x_lo + cell_w
+    bin_y_lo = torch.linspace(0, ch - cell_h, grid_size, device=device)
+    bin_y_hi = bin_y_lo + cell_h
 
-    sigma_x = mov_sizes[:, 0] / 2 + 1e-6
-    sigma_y = mov_sizes[:, 1] / 2 + 1e-6
-    areas = mov_sizes[:, 0] * mov_sizes[:, 1]
+    # Macro boundaries
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+    mac_x_lo = pos[:, 0] - half_w  # [N]
+    mac_x_hi = pos[:, 0] + half_w
+    mac_y_lo = pos[:, 1] - half_h
+    mac_y_hi = pos[:, 1] + half_h
 
-    dx = (cx.unsqueeze(0) - mov_pos[:, 0:1]) / sigma_x.unsqueeze(1)
-    dy = (cy.unsqueeze(0) - mov_pos[:, 1:2]) / sigma_y.unsqueeze(1)
+    # Smooth overlap computation using sigmoid for differentiability
+    # Overlap in x: min(mac_hi, bin_hi) - max(mac_lo, bin_lo), clamped > 0
+    # Smooth approximation using softplus
+    steep = 10.0 / max(cell_w, cell_h)
 
-    wx = torch.exp(-0.5 * dx ** 2)
-    wy = torch.exp(-0.5 * dy ** 2)
+    # [N, G] overlap in x dimension
+    overlap_x_lo = torch.max(mac_x_lo.unsqueeze(1), bin_x_lo.unsqueeze(0))
+    overlap_x_hi = torch.min(mac_x_hi.unsqueeze(1), bin_x_hi.unsqueeze(0))
+    ov_x = F.softplus(overlap_x_hi - overlap_x_lo, beta=steep)
 
-    norm = areas / (2 * 3.14159 * sigma_x * sigma_y)
-    wx_norm = wx * norm.unsqueeze(1)
+    # [N, G] overlap in y dimension
+    overlap_y_lo = torch.max(mac_y_lo.unsqueeze(1), bin_y_lo.unsqueeze(0))
+    overlap_y_hi = torch.min(mac_y_hi.unsqueeze(1), bin_y_hi.unsqueeze(0))
+    ov_y = F.softplus(overlap_y_hi - overlap_y_lo, beta=steep)
 
-    density = torch.einsum("mi,mj->ij", wx_norm, wy)
+    # Density per cell: sum of overlap areas / grid_area  → [G_x, G_y]
+    density = torch.einsum("ni,nj->ij", ov_x, ov_y) / grid_area
 
-    total_area = areas.sum()
-    target_density = total_area / (cw * ch)
-    density_per_cell = density / (cell_w * cell_h)
+    # Penalize top 10% (matching evaluator)
+    flat_density = density.flatten()
+    k = max(1, flat_density.numel() // 10)
+    top_vals = flat_density.topk(k).values
 
-    excess = torch.clamp(density_per_cell - target_density * target_scale, min=0)
-    hotspot = density_per_cell.flatten()
-    k = max(1, hotspot.numel() // 10)
-    top_vals = hotspot.topk(k).values
-    return ((excess ** 2).sum() + 0.25 * top_vals.pow(2).mean()) * cell_w * cell_h
+    # Target: uniform density if all macro area were spread evenly
+    total_area = (sizes[:, 0] * sizes[:, 1]).sum()
+    target_density = float(total_area / (cw * ch)) * target_scale
+
+    # Penalize top cells that exceed target
+    excess = torch.clamp(top_vals - target_density, min=0)
+    return excess.pow(2).sum() + 0.5 * top_vals.pow(2).mean()
+
+
+# ── Electrostatic repulsion (global spreading) ──────────────────────────
+
+def _repulsion_penalty(pos, sizes, movable_mask):
+    """
+    Electrostatic-inspired repulsion between all macro pairs.
+    Pushes macros apart proportionally to their areas and inversely
+    proportional to distance. Much more effective at global spreading
+    than bin-based density alone.
+    """
+    mov_idx = torch.where(movable_mask)[0]
+    n = len(mov_idx)
+    if n < 2:
+        return torch.tensor(0.0, device=pos.device)
+
+    mp = pos[mov_idx]
+    ms = sizes[mov_idx]
+    areas = ms[:, 0] * ms[:, 1]
+
+    # Pairwise distances (with epsilon to avoid division by zero)
+    dx = mp[:, 0].unsqueeze(1) - mp[:, 0].unsqueeze(0)
+    dy = mp[:, 1].unsqueeze(1) - mp[:, 1].unsqueeze(0)
+
+    # Minimum separation (sum of half-dimensions along each axis)
+    min_sep_x = (ms[:, 0].unsqueeze(1) + ms[:, 0].unsqueeze(0)) / 2
+    min_sep_y = (ms[:, 1].unsqueeze(1) + ms[:, 1].unsqueeze(0)) / 2
+    min_dist = (min_sep_x ** 2 + min_sep_y ** 2).sqrt()
+
+    dist = (dx ** 2 + dy ** 2 + 1e-4).sqrt()
+
+    # Charge proportional to area product
+    charge = areas.unsqueeze(1) * areas.unsqueeze(0)
+    area_norm = charge.max().clamp(min=1e-6)
+
+    # Repulsion: charge / max(dist, min_dist) — penalizes closeness
+    # Only upper triangle
+    mask = torch.triu(torch.ones(n, n, device=pos.device, dtype=torch.bool), diagonal=1)
+    repulsion = (charge / area_norm) * torch.clamp(min_dist * 1.5 - dist, min=0) / min_dist.clamp(min=1e-6)
+
+    return repulsion[mask].sum()
 
 
 # ── Overlap penalty (differentiable) ──────────────────────────────────────
