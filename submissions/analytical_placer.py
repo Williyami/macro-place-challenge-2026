@@ -208,7 +208,7 @@ def _congestion_penalty(pos, net_data, cw, ch, grid_size=32):
 
 # ── Differentiable density penalty (evaluator-matched) ───────────────────
 
-def _density_penalty(pos, sizes, movable_mask, cw, ch, grid_size=32, target_scale=1.35):
+def _density_penalty(pos, sizes, cw, ch, grid_size=32, target_scale=1.35):
     """
     Bin-based density penalty matching the evaluator's computation.
 
@@ -502,7 +502,7 @@ class AnalyticalPlacer(BasePlacer):
         boundary_weight: float = 0.02,
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
-        num_candidates: int = 4,
+        num_candidates: int = 3,
         sa_polish_iters: int = 80_000,
     ):
         self.seed = seed
@@ -543,6 +543,7 @@ class AnalyticalPlacer(BasePlacer):
         target_scale,
         seed_offset,
         iters,
+        repulsion_weight=0.0,
     ):
         torch.manual_seed(self.seed + seed_offset)
         np.random.seed(self.seed + seed_offset)
@@ -591,7 +592,7 @@ class AnalyticalPlacer(BasePlacer):
                 loss = loss + _lse_hpwl(pos_param, net_data, gamma=gamma)
 
             loss = loss + eff_density_weight * _density_penalty(
-                pos_param, inflated_sizes_t, movable_t, cw, ch, target_scale=target_scale
+                pos_param, inflated_sizes_t, cw, ch, target_scale=target_scale
             )
 
             if net_data is not None and congestion_weight > 0:
@@ -602,6 +603,12 @@ class AnalyticalPlacer(BasePlacer):
             loss = loss + ov_weight * _overlap_penalty(
                 pos_param, inflated_sizes_t, movable_t
             )
+
+            if repulsion_weight > 0:
+                # Repulsion ramps up with density (both push spreading)
+                loss = loss + repulsion_weight * density_ramp * _repulsion_penalty(
+                    pos_param, inflated_sizes_t, movable_t
+                )
 
             if boundary_weight > 0:
                 loss = loss + boundary_weight * _boundary_whitespace_penalty(
@@ -687,26 +694,22 @@ class AnalyticalPlacer(BasePlacer):
         else:
             quad_pos = initial_pos.clone()
 
-        # Per-candidate iteration budget: more iters than before
-        per_candidate_iters = max(1500, self.iters // 2)
+        # Per-candidate iteration budget
+        per_candidate_iters = max(2000, self.iters // 2)
 
         candidate_settings = [
-            # Quadratic init — wirelength-focused with moderate spreading
-            dict(density=self.density_weight * 1.0, congestion=self.congestion_weight * 1.2,
+            # Quadratic init — balanced with repulsion
+            dict(density=self.density_weight * 1.5, congestion=self.congestion_weight * 1.5,
                  boundary=self.boundary_weight * 0.3, halo_area=0.10, halo_base=0.03,
-                 target_scale=1.35, iters=per_candidate_iters, init=quad_pos),
-            # Quadratic init — strong density/congestion spreading
-            dict(density=self.density_weight * 2.5, congestion=self.congestion_weight * 3.0,
+                 target_scale=1.30, repulsion=0.5, iters=per_candidate_iters, init=quad_pos),
+            # Quadratic init — strong density/repulsion spreading
+            dict(density=self.density_weight * 3.0, congestion=self.congestion_weight * 3.0,
                  boundary=self.boundary_weight * 0.5, halo_area=0.16, halo_base=0.05,
-                 target_scale=1.15, iters=per_candidate_iters, init=quad_pos),
-            # Initial.plc init — balanced
-            dict(density=self.density_weight * 1.5, congestion=self.congestion_weight * 2.0,
+                 target_scale=1.10, repulsion=1.0, iters=per_candidate_iters, init=quad_pos),
+            # Initial.plc init — density-focused
+            dict(density=self.density_weight * 2.0, congestion=self.congestion_weight * 2.0,
                  boundary=self.boundary_weight * 0.5, halo_area=0.12, halo_base=0.04,
-                 target_scale=1.25, iters=per_candidate_iters, init=initial_pos),
-            # Quadratic init — aggressive spreading for congestion
-            dict(density=self.density_weight * 4.0, congestion=self.congestion_weight * 4.0,
-                 boundary=self.boundary_weight * 0.8, halo_area=0.18, halo_base=0.06,
-                 target_scale=1.10, iters=per_candidate_iters, init=quad_pos),
+                 target_scale=1.20, repulsion=0.8, iters=per_candidate_iters, init=initial_pos),
         ][: max(1, self.num_candidates)]
 
         best_full = None
@@ -727,6 +730,7 @@ class AnalyticalPlacer(BasePlacer):
                 target_scale=cfg["target_scale"],
                 seed_offset=idx * 997,
                 iters=cfg["iters"],
+                repulsion_weight=cfg["repulsion"],
             )
             if fallback_full is None:
                 fallback_full = full_pos
@@ -769,30 +773,37 @@ class AnalyticalPlacer(BasePlacer):
                     grid_col = grid_row = 0
                     density_w = 0.0
 
-            polished_pos = _sa_refine(
-                best_legal_pos, nets, macro_to_nets, neighbors,
-                movable_np, sizes_np, half_w, half_h, sep_x, sep_y,
-                cw, ch,
-                max_iters=self.sa_polish_iters,
-                seed=self.seed + 7777,
-                t_start_factor=0.06,
-                t_end_factor=0.0005,
-                density_weight=density_w,
-                grid_col=grid_col,
-                grid_row=grid_row,
-                benchmark=benchmark,
-            )
+            # Multi-start SA polish: run multiple starts, keep best
+            best_polished_score = best_score
+            best_polished_full = best_full
 
-            polished_full = benchmark.macro_positions.clone()
-            polished_full[:n_hard] = torch.tensor(polished_pos, dtype=torch.float32)
+            for sa_start in range(3):
+                polished_pos = _sa_refine(
+                    best_legal_pos, nets, macro_to_nets, neighbors,
+                    movable_np, sizes_np, half_w, half_h, sep_x, sep_y,
+                    cw, ch,
+                    max_iters=self.sa_polish_iters,
+                    seed=self.seed + 7777 + sa_start * 1000,
+                    t_start_factor=0.08,
+                    t_end_factor=0.0005,
+                    density_weight=density_w,
+                    grid_col=grid_col,
+                    grid_row=grid_row,
+                    benchmark=benchmark,
+                )
 
-            # Keep polished result only if it actually improves proxy cost
-            if plc is not None:
-                try:
-                    polished_costs = compute_proxy_cost(polished_full, benchmark, plc)
-                    if polished_costs["proxy_cost"] < best_score:
-                        best_full = polished_full
-                except Exception:
-                    pass
+                polished_full = benchmark.macro_positions.clone()
+                polished_full[:n_hard] = torch.tensor(polished_pos, dtype=torch.float32)
+
+                if plc is not None:
+                    try:
+                        polished_costs = compute_proxy_cost(polished_full, benchmark, plc)
+                        if polished_costs["proxy_cost"] < best_polished_score:
+                            best_polished_score = polished_costs["proxy_cost"]
+                            best_polished_full = polished_full
+                    except Exception:
+                        pass
+
+            best_full = best_polished_full
 
         return best_full
