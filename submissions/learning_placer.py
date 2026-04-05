@@ -22,6 +22,8 @@ Key improvements over v1 (informed by research papers):
   - Nesterov-accelerated refinement with electric-field density
     (from DREAMPlace: better optimizer + density model)
   - Multi-start with diverse seeds for GNN fine-tuning
+  - Congestion-aware loss matching actual proxy_cost scoring
+    (from Synopsys congestion paper: aligns training with evaluation metric)
 """
 
 import math
@@ -192,6 +194,50 @@ def _smooth_overlap_penalty(pos: torch.Tensor, sizes: torch.Tensor,
     mask = mask * pair_mask
 
     return (overlap_area * mask).sum() / 2
+
+
+# ── Congestion loss (aligns with proxy_cost scoring) ───────────────────────
+
+def _congestion_penalty(pos: torch.Tensor, sizes: torch.Tensor,
+                        cw: float, ch: float,
+                        grid_n: int = 16) -> torch.Tensor:
+    """
+    Differentiable congestion proxy matching the evaluation metric.
+
+    The actual scoring uses proxy_cost = WL + 0.5*density + 0.5*congestion.
+    This loss estimates routing congestion as the variance and peaks of
+    macro density across grid cells (from Synopsys congestion paper).
+    """
+    cell_w = cw / grid_n
+    cell_h = ch / grid_n
+    cell_area = cell_w * cell_h
+
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+
+    macro_l = pos[:, 0] - half_w
+    macro_r = pos[:, 0] + half_w
+    macro_b = pos[:, 1] - half_h
+    macro_t = pos[:, 1] + half_h
+
+    gx = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_w + cell_w / 2
+    gy = torch.arange(grid_n, device=pos.device, dtype=pos.dtype) * cell_h + cell_h / 2
+
+    grid_l = gx - cell_w / 2
+    grid_r = gx + cell_w / 2
+    grid_b = gy - cell_h / 2
+    grid_t = gy + cell_h / 2
+
+    ox = F.relu(torch.min(macro_r.unsqueeze(1), grid_r.unsqueeze(0))
+                - torch.max(macro_l.unsqueeze(1), grid_l.unsqueeze(0)))
+    oy = F.relu(torch.min(macro_t.unsqueeze(1), grid_t.unsqueeze(0))
+                - torch.max(macro_b.unsqueeze(1), grid_b.unsqueeze(0)))
+
+    overlap = ox.unsqueeze(2) * oy.unsqueeze(1)
+    density = overlap.sum(0) / cell_area
+
+    cong_loss = density.var() + F.relu(density - 1.0).pow(2).mean()
+    return cong_loss
 
 
 # ── GNN with edge-weight attention ─────────────────────────────────────────
@@ -374,8 +420,10 @@ class LearningPlacer(BasePlacer):
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_n=16, target_util=0.5) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * (0.1 + 0.5 * frac)
+            loss_cong = _congestion_penalty(pos, sizes, cw, ch,
+                                            grid_n=16) * (cw * ch) * (0.005 + 0.015 * frac)
 
-            loss = loss_wl + loss_den + loss_ov
+            loss = loss_wl + loss_den + loss_ov + loss_cong
             loss.backward()
             torch.nn.utils.clip_grad_norm_(gnn.parameters(), 1.0)
             gnn_opt.step()
@@ -418,8 +466,11 @@ class LearningPlacer(BasePlacer):
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_n=16, target_util=0.5) * (cw * ch) * den_weight
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * ov_weight
+            cong_weight = 0.01 + 0.04 * frac
+            loss_cong = _congestion_penalty(pos, sizes, cw, ch,
+                                            grid_n=16) * (cw * ch) * cong_weight
 
-            loss = loss_wl + loss_den + loss_ov
+            loss = loss_wl + loss_den + loss_ov + loss_cong
 
             with torch.no_grad():
                 ov_area = _smooth_overlap_penalty(pos, sizes, movable).item()
