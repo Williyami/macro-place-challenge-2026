@@ -3,14 +3,12 @@ Analytical (gradient-based) placer — differentiable placement with Adam.
 
 Approach:
   - Differentiable HPWL via log-sum-exp (LSE) approximation
-  - Differentiable Gaussian density penalty (smooth spreading)
+  - Differentiable density / congestion on a 32×32 soft grid (stable training)
   - Differentiable overlap penalty (increasing weight schedule)
-  - Differentiable congestion proxy (net bounding-box routing demand)
   - Quadratic placement initialization from net connectivity
   - Progressive density weight ramping (RePlAce-style)
-  - Adam optimizer with cosine-annealed LR and projection to canvas bounds
-  - Legalization post-processing (minimum displacement, reused from sa_placer)
-  - SA polish after legalization for local refinement
+  - Adam + cosine LR; legalization; multi-start SA polish with reheating and
+    slightly boosted density weight (proxy aligns with WL + 0.5·D + 0.5·C)
 
 Usage:
     PLACER_METHOD=analytical uv run evaluate submissions/placer.py --all
@@ -159,14 +157,11 @@ def _congestion_penalty(
     ch,
     grid_cols=32,
     grid_rows=32,
-    headroom=1.85,
+    headroom=2.0,
 ):
     """
-    Smooth congestion proxy aligned with PlacementCost routing grid when
-    grid_cols/grid_rows match plc.grid_col/plc.grid_row.
-
-    Penalizes squared excess demand plus a light peak term on the hottest cells
-    so optimization pushes down congestion (the dominant term on IBM01).
+    Smooth congestion proxy: net bounding-box routing demand on a fixed grid.
+    (32×32 balances fidelity vs speed; matching plc dimensions did not help ibm01.)
     """
     px, py = _get_pin_positions(pos, net_data)
     mask = net_data["pin_mask"]
@@ -503,17 +498,17 @@ class AnalyticalPlacer(BasePlacer):
     def __init__(
         self,
         seed: int = 42,
-        iters: int = 3_600,
+        iters: int = 3_000,
         lr: float = 5.0,
         gamma_start: float = 50.0,
         gamma_end: float = 3.0,
         density_weight: float = 0.005,
-        congestion_weight: float = 0.00055,
+        congestion_weight: float = 0.0005,
         boundary_weight: float = 0.02,
         overlap_weight_start: float = 0.01,
         overlap_weight_end: float = 20.0,
         num_candidates: int = 3,
-        sa_polish_iters: int = 88_000,
+        sa_polish_iters: int = 85_000,
     ):
         self.seed = seed
         self.iters = iters
@@ -596,11 +591,7 @@ class AnalyticalPlacer(BasePlacer):
 
             # Progressive density weight: start at 0.1x, ramp to full
             density_ramp = 0.1 + 0.9 * min(1.0, frac * 2.5)
-            # Last 30%: gently favor congestion/density; ease repulsion so WL can recover
-            late = 0.0 if frac < 0.70 else (frac - 0.70) / 0.30
-            eff_density_weight = density_weight * density_ramp * (1.0 + 0.32 * late)
-            eff_cong_w = congestion_weight * (1.0 + 0.55 * late)
-            rep_scale = density_ramp * (1.0 - 0.38 * late)
+            eff_density_weight = density_weight * density_ramp
 
             loss = torch.tensor(0.0, device=pos_param.device)
             if net_data is not None:
@@ -616,8 +607,8 @@ class AnalyticalPlacer(BasePlacer):
                 target_scale=target_scale,
             )
 
-            if net_data is not None and eff_cong_w > 0:
-                loss = loss + eff_cong_w * _congestion_penalty(
+            if net_data is not None and congestion_weight > 0:
+                loss = loss + congestion_weight * _congestion_penalty(
                     pos_param,
                     net_data,
                     cw,
@@ -631,7 +622,7 @@ class AnalyticalPlacer(BasePlacer):
             )
 
             if repulsion_weight > 0:
-                loss = loss + repulsion_weight * rep_scale * _repulsion_penalty(
+                loss = loss + repulsion_weight * density_ramp * _repulsion_penalty(
                     pos_param, inflated_sizes_t, movable_t
                 )
 
@@ -706,11 +697,8 @@ class AnalyticalPlacer(BasePlacer):
 
         net_data = _build_net_tensors(nets) if nets else None
 
-        if plc is not None and getattr(plc, "grid_col", 0) and getattr(plc, "grid_row", 0):
-            grid_cols = int(plc.grid_col)
-            grid_rows = int(plc.grid_row)
-        else:
-            grid_cols, grid_rows = 32, 32
+        # Fixed 32×32 for differentiable density/congestion (stable vs evaluator grid)
+        grid_cols, grid_rows = 32, 32
 
         # Initialise: try quadratic placement from connectivity, fall back to initial.plc
         initial_pos = benchmark.macro_positions[:n_hard].clone().float()
@@ -798,6 +786,8 @@ class AnalyticalPlacer(BasePlacer):
                         raw_hpwl = _compute_total_hpwl(best_legal_pos, nets)
                         if wl_norm > 1e-10 and raw_hpwl > 1e-10:
                             density_w = 0.5 * raw_hpwl / wl_norm
+                            # Slightly stronger density in SA vs pure HPWL — helps ibm01 proxy
+                            density_w *= 1.15
                 except Exception:
                     grid_col = grid_row = 0
                     density_w = 0.0
@@ -813,9 +803,9 @@ class AnalyticalPlacer(BasePlacer):
                     cw, ch,
                     max_iters=self.sa_polish_iters,
                     seed=self.seed + 7777 + sa_start * 1000,
-                    t_start_factor=0.12,
-                    t_end_factor=0.0008,
-                    reheat_threshold=12000,
+                    t_start_factor=0.10,
+                    t_end_factor=0.00065,
+                    reheat_threshold=9000,
                     reheat_factor=2.5,
                     density_weight=density_w,
                     grid_col=grid_col,
