@@ -438,9 +438,11 @@ def _congestion_local_search(pos: np.ndarray, nets: list, macro_to_nets: list,
     current_proxy, current_cong = eval_proxy()
 
     # Sort macros by connectivity (most-connected first — they contribute
-    # most to routing congestion)
+    # most to routing congestion). Only try top 20% most-connected.
     macro_connectivity = np.array([len(macro_to_nets[i]) for i in range(n_hard)])
     sorted_macros = np.argsort(-macro_connectivity)
+    n_try = max(5, n_hard // 5)  # top 20%, at least 5
+    sorted_macros = sorted_macros[:n_try]
 
     for round_num in range(max_rounds):
         improved_this_round = False
@@ -567,14 +569,19 @@ def _proxy_greedy_flip(pos: np.ndarray, nets: list, macro_to_nets: list,
                 nets[ni]["hard_ox"][k] = -ox if flip_x else ox
             for ni, k, oy in orig_oy:
                 nets[ni]["hard_oy"][k] = -oy if flip_y else oy
+            # Update plc pin offsets (same as _greedy_flip)
             if plc is not None:
-                for ni, k in pin_locs:
-                    net = nets[ni]
-                    pin_idx = net.get("pin_indices")
-                    if pin_idx is not None and k < len(pin_idx):
-                        plc.set_soft_macro_position(pin_idx[k],
-                                                     nets[ni]["hard_ox"][k],
-                                                     nets[ni]["hard_oy"][k])
+                plc_idx = plc.hard_macro_indices[i]
+                macro_name = plc.modules_w_pins[plc_idx].get_name()
+                pin_names = plc.hard_macros_to_inpins.get(macro_name, [])
+                for pin_name in pin_names:
+                    if pin_name not in plc.mod_name_to_indices:
+                        continue
+                    pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
+                    ox, oy = pin_obj.get_offset()
+                    new_ox = -ox if flip_x else ox
+                    new_oy = -oy if flip_y else oy
+                    pin_obj.set_offset(new_ox, new_oy)
 
 
 class NetlistGNN(nn.Module):
