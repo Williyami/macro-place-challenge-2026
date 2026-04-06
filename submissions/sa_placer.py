@@ -27,6 +27,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from macro_place.benchmark import Benchmark
+from macro_place.objective import compute_proxy_cost
 from submissions.base import BasePlacer
 
 
@@ -775,6 +776,13 @@ class SAPlacer(BasePlacer):
     num_starts   : number of independent SA runs (best result kept)
     reheat_threshold : iterations without improvement before reheating (0=off)
     per_benchmark_overrides : dict mapping benchmark name to param overrides
+    density_weight_boost : multiply calibrated density weight (1.0 = default; >1
+        can help on some designs at lower iteration budgets)
+    select_best_by_proxy : if True and num_starts > 1, pick the run with lowest
+        proxy cost instead of lowest raw HPWL (aligns with competition metric)
+
+    Net neighbors for local moves are deduplicated so RNG sampling is not
+    biased when the same macro pair appears in many nets.
     """
 
     # Default per-benchmark overrides for known difficult benchmarks.
@@ -803,6 +811,8 @@ class SAPlacer(BasePlacer):
         reheat_factor: float = 3.0,
         per_benchmark_overrides=None,
         analytical_warmstart: bool = False,
+        density_weight_boost: float = 1.0,
+        select_best_by_proxy: bool = True,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -817,6 +827,8 @@ class SAPlacer(BasePlacer):
         self.reheat_factor = reheat_factor
         self.per_benchmark_overrides = per_benchmark_overrides or self.DEFAULT_OVERRIDES
         self.analytical_warmstart = analytical_warmstart
+        self.density_weight_boost = density_weight_boost
+        self.select_best_by_proxy = select_best_by_proxy
         self.debug_snapshots = []
         self.debug_trace = []
 
@@ -863,14 +875,15 @@ class SAPlacer(BasePlacer):
         else:
             nets, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        # Build net-neighbor adjacency (for TOWARD_NEIGHBOR moves)
-        neighbors = [[] for _ in range(n_hard)]
+        # Net-neighbor adjacency for TOWARD_NEIGHBOR moves (deduped for faster sampling)
+        neighbors = [set() for _ in range(n_hard)]
         for net in nets:
             idx = net["hard_idx"]
             for a in idx:
                 for b in idx:
                     if a != b:
-                        neighbors[a].append(int(b))
+                        neighbors[a].add(int(b))
+        neighbors = [list(s) for s in neighbors]
 
         # Initialise from hand-crafted initial.plc positions + legalize
         init_pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
@@ -925,14 +938,20 @@ class SAPlacer(BasePlacer):
                         # density_weight converts: delta_density → HPWL-equivalent
                         # proxy uses weight 0.5 for density, so:
                         density_w = 0.5 * raw_hpwl / wl_norm
+                        density_w *= self.density_weight_boost
             except Exception:
                 grid_col = grid_row = 0
                 density_w = 0.0
 
         # Multi-start SA: run multiple times with different seeds, keep best
         num_starts = params["num_starts"]
-        best_pos = init_pos
-        best_hpwl = float("inf")
+        best_pos = init_pos.copy()
+        best_score = float("inf")
+        use_proxy = (
+            self.select_best_by_proxy
+            and plc is not None
+            and num_starts > 1
+        )
 
         if nets:
             for start_idx in range(num_starts):
@@ -954,10 +973,20 @@ class SAPlacer(BasePlacer):
                     grid_row=grid_row,
                     benchmark=benchmark,
                 )
-                hpwl = _compute_total_hpwl(pos, nets)
-                if hpwl < best_hpwl:
-                    best_hpwl = hpwl
-                    best_pos = pos
+                if use_proxy:
+                    full_try = benchmark.macro_positions.clone()
+                    full_try[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+                    try:
+                        metric = float(
+                            compute_proxy_cost(full_try, benchmark, plc)["proxy_cost"]
+                        )
+                    except Exception:
+                        metric = _compute_total_hpwl(pos, nets)
+                else:
+                    metric = _compute_total_hpwl(pos, nets)
+                if metric < best_score:
+                    best_score = metric
+                    best_pos = pos.copy()
         else:
             best_pos = init_pos
 
