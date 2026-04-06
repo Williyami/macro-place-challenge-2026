@@ -18,7 +18,8 @@ PLACER_METHOD=learning uv run evaluate submissions/placer.py --all --no-media
 
 ## After Running Benchmarks
 
-Every time you run benchmarks, you MUST do all three of these steps:
+Every time you run the full IBM benchmark suite (`--all`), you MUST do all three of these steps.
+Do not do these logging/update steps for quick single-benchmark test runs.
 
 ### 1. Log results to the correct notes file
 
