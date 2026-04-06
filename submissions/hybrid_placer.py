@@ -118,11 +118,11 @@ def _build_net_tensors(plc, device):
     net_weight = torch.zeros(N, dtype=torch.float32, device=device)
 
     for i, (w, pins) in enumerate(raw_nets):
-        net_weight[i] = w
+        net_weight[i] = float(w)
         for j, (is_hard, idx, ox, oy) in enumerate(pins):
             net_mask[i, j] = True
-            net_ox[i, j] = ox
-            net_oy[i, j] = oy
+            net_ox[i, j] = float(ox)
+            net_oy[i, j] = float(oy)
             if is_hard:
                 net_is_hard[i, j] = True
                 net_hard[i, j] = idx
