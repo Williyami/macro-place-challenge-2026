@@ -891,7 +891,7 @@ class HybridPlacer(BasePlacer):
         gamma: float = 5.0,
         density_weight: float = 0.001,
         overlap_weight: float = 0.05,
-        advanced_analytical_warmstart: bool = True,
+        advanced_analytical_warmstart: bool = False,
         analytical_candidates: int = 2,
         # SA phase
         sa_iters: int = 300_000,
@@ -901,7 +901,7 @@ class HybridPlacer(BasePlacer):
         reheat_factor: float = 3.0,
         congestion_weight: float = 50.0,
         density_sa_weight: float = 0.005,
-        post_refine_steps: int = 250,
+        post_refine_steps: int = 0,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
