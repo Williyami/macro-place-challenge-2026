@@ -149,3 +149,86 @@ Total runtime: **324.72s** (~5.4 min for all 17 benchmarks, run with `--no-media
 
 - Essentially unchanged from the previous hybrid run (1.6972 -> 1.6977)
 - Same overall ranking profile, but much faster wall-clock runtime because media generation was disabled
+
+---
+
+## v3 Results (2026-04-06) — 300K SA iters + RUDY congestion helpers
+
+Changes from v1:
+- SA iterations increased to 300K (up from 150K)
+- Added RUDY congestion estimation helpers (grid-based L-shaped routing + macro blockage)
+- Congestion-aware SA function implemented but not used in final run (too slow per-move)
+- Tested congestion-aware SA, density-tracking SA — both hurt more than helped
+- The pure HPWL-only SA with more iterations was the best approach
+
+| Benchmark | v3 Proxy |    WL | Density | Congestion | v1 Proxy | Change | SA Baseline | vs SA |  Time |
+|-----------|----------|-------|---------|------------|----------|--------|-------------|-------|-------|
+| ibm01     |   1.2362 | 0.065 |   1.035 |      1.308 |   1.2477 |  -0.9% |      1.3166 | +6.1% |   98s |
+| ibm02     |   1.7591 | 0.079 |   0.982 |      2.378 |   1.7787 |  -1.1% |      1.9072 | +7.8% |  109s |
+| ibm03     |   1.7819 | 0.078 |   1.147 |      2.261 |   1.7756 |  +0.4% |      1.7401 | -2.4% |  103s |
+| ibm04     |   1.6181 | 0.068 |   1.060 |      2.040 |   1.6133 |  +0.3% |      1.5037 | -7.6% |  101s |
+| ibm06     |   2.0324 | 0.063 |   1.050 |      2.889 |   2.0305 |  +0.1% |      2.5057 |+18.9% |   73s |
+| ibm07     |   1.6864 | 0.064 |   1.084 |      2.160 |   1.6873 |  -0.1% |      2.0229 |+16.6% |  111s |
+| ibm08     |   1.8342 | 0.067 |   1.141 |      2.394 |   1.8384 |  -0.2% |      1.9239 | +4.7% |  121s |
+| ibm09     |   1.2505 | 0.057 |   1.000 |      1.387 |   1.2531 |  -0.2% |      1.3875 | +9.9% |  121s |
+| ibm10     |   1.6951 | 0.059 |   0.994 |      2.279 |   1.6922 |  +0.2% |      2.1108 |+19.7% |  263s |
+| ibm11     |   1.4258 | 0.054 |   1.086 |      1.658 |   1.4209 |  +0.3% |      1.7111 |+16.7% |  109s |
+| ibm12     |   1.9837 | 0.062 |   1.066 |      2.778 |   1.9854 |  -0.1% |      2.8261 |+29.8% |  175s |
+| ibm13     |   1.6342 | 0.053 |   1.116 |      2.048 |   1.6461 |  -0.7% |      1.9141 |+14.6% |  111s |
+| ibm14     |   1.7251 | 0.050 |   1.107 |      2.242 |   1.7276 |  -0.1% |      2.2750 |+24.2% |  283s |
+| ibm15     |   1.8139 | 0.057 |   1.142 |      2.371 |   1.8139 |   0.0% |      2.3000 |+21.1% |  137s |
+| ibm16     |   1.7451 | 0.047 |   1.044 |      2.352 |   1.7381 |  +0.4% |      2.2337 |+21.9% |  158s |
+| ibm17     |   1.7833 | 0.052 |   1.006 |      2.457 |   1.7802 |  +0.2% |      3.6726 |+51.4% |    — |
+| ibm18     |   1.8340 | 0.053 |   1.109 |      2.453 |   1.8326 |  +0.1% |      2.7755 |+33.9% |   61s |
+| **AVG**   | **1.6964** |    — |       — |          — | **1.6977**| **-0.1%** | **2.1251** |**+20.2%** | — |
+
+### Conclusion
+
+v3 (300K SA iters) is essentially tied with v1 (1.6964 vs 1.6977, -0.1%). 
+More SA iterations help marginally on some benchmarks (ibm01: -0.9%, ibm02: -1.1%, ibm13: -0.7%) 
+but hurt slightly on others, netting out to roughly zero improvement at ~2x runtime cost.
+
+**Congestion-aware SA approaches tested and rejected:**
+- RUDY incremental congestion in SA: too slow (~10x overhead per move), marginal congestion improvement
+- Density-tracking SA: slow and didn't improve proxy cost
+- Split approach (80% HPWL SA + 20% congestion SA): slight congestion improvement but offset by worse HPWL
+
+**Key takeaway**: The bottleneck remains congestion, but SA-level congestion optimization
+is too slow and imprecise to help. The evaluator's L-shaped routing + smoothing + abu(5%)
+is hard to approximate incrementally. A fundamentally different approach (e.g., DREAMPlace-style
+differentiable placement with congestion-aware density) would be needed to close the gap to RePlAce.
+
+---
+
+## Benchmark Results (2026-04-06)
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **3998.65s** (~66.6 min for all 17 benchmarks)
+
+| Benchmark |  Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | Overlaps |
+|-----------|--------|-------------|---------|--------|------------|----------|
+| ibm01     | 1.2362 |      1.3166 |  0.9976 |  +6.1% |     -23.9% |        0 |
+| ibm02     | 1.7591 |      1.9072 |  1.8370 |  +7.8% |      +4.2% |        0 |
+| ibm03     | 1.7848 |      1.7401 |  1.3222 |  -2.6% |     -35.0% |        0 |
+| ibm04     | 1.6224 |      1.5037 |  1.3024 |  -7.9% |     -24.6% |        0 |
+| ibm06     | 2.0324 |      2.5057 |  1.6187 | +18.9% |     -25.6% |        0 |
+| ibm07     | 1.6864 |      2.0229 |  1.4633 | +16.6% |     -15.2% |        0 |
+| ibm08     | 1.8275 |      1.9239 |  1.4285 |  +5.0% |     -27.9% |        0 |
+| ibm09     | 1.2505 |      1.3875 |  1.1194 |  +9.9% |     -11.7% |        0 |
+| ibm10     | 1.6908 |      2.1108 |  1.5009 | +19.9% |     -12.7% |        0 |
+| ibm11     | 1.4337 |      1.7111 |  1.1774 | +16.2% |     -21.8% |        0 |
+| ibm12     | 1.9814 |      2.8261 |  1.7261 | +29.9% |     -14.8% |        0 |
+| ibm13     | 1.6423 |      1.9141 |  1.3355 | +14.2% |     -23.0% |        0 |
+| ibm14     | 1.7259 |      2.2750 |  1.5436 | +24.1% |     -11.8% |        0 |
+| ibm15     | 1.8156 |      2.3000 |  1.5159 | +21.1% |     -19.8% |        0 |
+| ibm16     | 1.7436 |      2.2337 |  1.4780 | +21.9% |     -18.0% |        0 |
+| ibm17     | 1.7761 |      3.6726 |  1.6446 | +51.6% |      -8.0% |        0 |
+| ibm18     | 1.8340 |      2.7755 |  1.7722 | +33.9% |      -3.5% |        0 |
+| **AVG**   | **1.6966** | **2.1251** | **1.4578** | **+20.2%** | **-16.4%** | **0** |
+
+### Summary
+
+- Average proxy cost improved slightly to **1.6966**
+- Beats the SA baseline by **20.2%** on average with **zero overlaps**
+- Still trails RePlAce by **16.4%** on average
+- Runtime rose substantially to **3998.65s**, so the gain over prior runs is very small relative to the extra cost
