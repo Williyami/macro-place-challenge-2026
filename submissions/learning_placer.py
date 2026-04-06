@@ -1112,7 +1112,7 @@ class LearningPlacer(BasePlacer):
         pos_np, proxy = self._run_from_initial(
             self.seed + 98000, benchmark, nets_raw, macro_to_nets,
             sizes, movable, orig_pos, cw, ch, n_hard, neighbors, plc,
-            t_start_factor=0.20, t_end_factor=0.0005, sa_iter_mult=1.5,
+            t_start_factor=0.20, t_end_factor=0.0005, sa_iter_mult=1.2,
         )
         _update_best(pos_np, proxy)
 
