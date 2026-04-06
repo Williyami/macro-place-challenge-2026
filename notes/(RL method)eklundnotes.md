@@ -175,3 +175,33 @@ Beat SA baseline on 17/17. Beat RePlAce on 2/17 (ibm02, ibm12).
 Congestion-focused changes drove big gains on ibm06 (-16.9%), ibm07 (-10.8%), ibm16 (-9.7%), ibm12 (-15.6%).
 Density scores excellent (mostly 0.7-1.0). Congestion still the main gap vs RePlAce.
 Close to RePlAce on ibm07 (-1.2%), ibm18 (-1.5%), ibm16 (-1.7%).
+
+## 2026-04-06 — SA V2: GPU-assisted post-refinement with CPU fallback
+
+Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC, greedy local search, and GPU-assisted post-refinement
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.2564 | 0.088 | 0.927 | 1.410 | 80.75s | BETTER (1.3166) |
+| ibm02 | 1.6908 | 0.085 | 0.783 | 2.429 | 77.08s | BETTER (1.9072) |
+| ibm03 | 1.4712 | 0.086 | 0.829 | 1.940 | 62.24s | BETTER (1.7401) |
+| ibm04 | 1.5237 | 0.078 | 0.886 | 2.005 | 262.14s | WORSE (1.5037) |
+| ibm06 | 1.7958 | 0.067 | 0.788 | 2.669 | 58.71s | BETTER (2.5057) |
+| ibm07 | 1.5767 | 0.068 | 0.901 | 2.118 | 78.22s | BETTER (2.0229) |
+| ibm08 | 1.6220 | 0.074 | 0.935 | 2.161 | 95.94s | BETTER (1.9239) |
+| ibm09 | 1.2071 | 0.060 | 0.898 | 1.396 | 74.49s | BETTER (1.3875) |
+| ibm10 | 1.5070 | 0.076 | 0.746 | 2.117 | 324.50s | BETTER (2.1108) |
+| ibm11 | 1.3136 | 0.057 | 0.917 | 1.597 | 98.48s | BETTER (1.7111) |
+| ibm12 | 1.7353 | 0.066 | 0.799 | 2.540 | 285.93s | BETTER (2.8261) |
+| ibm13 | 1.4951 | 0.057 | 0.950 | 1.927 | 111.21s | BETTER (1.9141) |
+| ibm14 | 1.6527 | 0.054 | 0.998 | 2.201 | 371.52s | BETTER (2.2750) |
+| ibm15 | 1.6473 | 0.059 | 0.976 | 2.201 | 196.69s | BETTER (2.3000) |
+| ibm16 | 1.6145 | 0.050 | 0.910 | 2.218 | 407.15s | BETTER (2.2337) |
+| ibm17 | 1.7702 | 0.054 | 0.967 | 2.465 | 712.17s | BETTER (3.6726) |
+| ibm18 | 1.8050 | 0.053 | 1.058 | 2.446 | 181.13s | BETTER (2.7755) |
+| **AVG** | **1.5697** | | | | 3478.35s | **SA: 2.1251** |
+
+Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
+**Result:** Much better than the SA baseline, but still behind our best logged SA V1 run (1.4803) and the current learning placer (1.5587).
+The GPU-assisted fallback path is integrated and validated, but this first SA V2 full-suite run is still congestion-limited on ibm04/ibm10/ibm17.

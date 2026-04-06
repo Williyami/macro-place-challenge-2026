@@ -70,6 +70,8 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
         if not block.startswith("## "):
             continue
         heading = block.splitlines()[0][3:].strip()
+        if "sa_v2" in heading.lower() or "sa v2" in heading.lower():
+            continue
         if "—" in heading:
             date, title = [part.strip() for part in heading.split("—", 1)]
         else:

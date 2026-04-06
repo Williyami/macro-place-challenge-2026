@@ -6,11 +6,11 @@ Generated from the note files in this directory.
 
 | Run ID | Method | Date | Title | Scope | Benchmarks Logged | Plotted Proxy | Full-Suite Avg Proxy | Total Runtime (s) | Source |
 |--------|--------|------|-------|-------|-------------------|---------------|----------------------|-------------------|--------|
-| L1 | Learning Placer | 2026-04-03 | Stronger density + congestion proxy + target_util=0.6 | full_suite | 17 | 1.7117 | 1.7117 | 170.83 | (RL method)eklundnotes.md |
-| L2 | Learning Placer | 2026-04-04 | Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
-| L3 | Learning Placer | 2026-04-04 | v2: Pre-trained GNN + Density-aware SA + Greedy Flipping | full_suite | 17 | 1.6282 | 1.6282 | 84.55 | (RL method)eklundnotes.md |
-| L4 | Learning Placer | 2026-04-05 | v3: Research-paper-informed pretraining improvements | full_suite | 17 | 1.6353 | 1.6353 | 2275.30 | (RL method)eklundnotes.md |
-| L5 | Learning Placer | 2026-04-06 | v4: Congestion-focused overhaul + compute increase | full_suite | 17 | 1.5587 | 1.5587 | 16101.80 | (RL method)eklundnotes.md |
+| L1 | Learning Placer | - | 2026-04-03 — Stronger density + congestion proxy + target_util=0.6 | full_suite | 17 | 1.7117 | 1.7117 | 170.83 | (RL method)eklundnotes.md |
+| L2 | Learning Placer | - | 2026-04-04 — Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
+| L3 | Learning Placer | - | 2026-04-04 — v2: Pre-trained GNN + Density-aware SA + Greedy Flipping | full_suite | 17 | 1.6282 | 1.6282 | 84.55 | (RL method)eklundnotes.md |
+| L4 | Learning Placer | - | 2026-04-05 — v3: Research-paper-informed pretraining improvements | full_suite | 17 | 1.6353 | 1.6353 | 2275.30 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | - | 2026-04-06 — v4: Congestion-focused overhaul + compute increase | full_suite | 17 | 1.5587 | 1.5587 | 16101.80 | (RL method)eklundnotes.md |
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
@@ -21,6 +21,7 @@ Generated from the note files in this directory.
 | H1 | HybridPlacer | 2026-04-03 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6972 | 1.6972 | 1492.67 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | 2026-04-06 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6966 | 1.6966 | 3998.65 | (Hybrid method)novaknotes.md |
+| V1 | SA V2 (Eklund) | - | 2026-04-06 — SA V2: GPU-assisted post-refinement with CPU fallback | full_suite | 17 | 1.5697 | 1.5697 | 3478.35 | (RL method)eklundnotes.md |
 
 ## Benchmark-Level Records
 
@@ -281,3 +282,20 @@ Generated from the note files in this directory.
 | H3 | HybridPlacer | ibm16 | 1.7436 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | ibm17 | 1.7761 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | ibm18 | 1.8340 | - | - | - | - | (Hybrid method)novaknotes.md |
+| V1 | SA V2 (Eklund) | ibm01 | 1.2564 | 0.088 | 0.927 | 1.410 | 80.75 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm02 | 1.6908 | 0.085 | 0.783 | 2.429 | 77.08 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm03 | 1.4712 | 0.086 | 0.829 | 1.940 | 62.24 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm04 | 1.5237 | 0.078 | 0.886 | 2.005 | 262.14 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm06 | 1.7958 | 0.067 | 0.788 | 2.669 | 58.71 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm07 | 1.5767 | 0.068 | 0.901 | 2.118 | 78.22 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm08 | 1.6220 | 0.074 | 0.935 | 2.161 | 95.94 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm09 | 1.2071 | 0.060 | 0.898 | 1.396 | 74.49 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm10 | 1.5070 | 0.076 | 0.746 | 2.117 | 324.50 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm11 | 1.3136 | 0.057 | 0.917 | 1.597 | 98.48 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm12 | 1.7353 | 0.066 | 0.799 | 2.540 | 285.93 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm13 | 1.4951 | 0.057 | 0.950 | 1.927 | 111.21 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm14 | 1.6527 | 0.054 | 0.998 | 2.201 | 371.52 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm15 | 1.6473 | 0.059 | 0.976 | 2.201 | 196.69 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm16 | 1.6145 | 0.050 | 0.910 | 2.218 | 407.15 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm17 | 1.7702 | 0.054 | 0.967 | 2.465 | 712.17 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm18 | 1.8050 | 0.053 | 1.058 | 2.446 | 181.13 | (RL method)eklundnotes.md |
