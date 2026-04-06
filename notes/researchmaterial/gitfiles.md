@@ -1,0 +1,7 @@
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/TILOS-AI-Institute/MacroPlacement&ved=2ahUKEwjpkPj_ltmTAxXpFRAIHZo5GS4QFnoECBsQAQ&usg=AOvVaw2mgEh89VlUv4gZr8QfoWna
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/lamda-bbo/macro-regulator&ved=2ahUKEwjpkPj_ltmTAxXpFRAIHZo5GS4QFnoECBoQAQ&usg=AOvVaw1xPaKfPGK1wowyfyFgRvcx
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/MIRALab-USTC/AI4EDA-EfficientPlace&ved=2ahUKEwjpkPj_ltmTAxXpFRAIHZo5GS4QFnoECBkQAQ&usg=AOvVaw0vXIyJoS_tBgsvI7BFNvwi
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/CMACH508/DeepTH&ved=2ahUKEwjpkPj_ltmTAxXpFRAIHZo5GS4QFnoECDsQAQ&usg=AOvVaw0L__PG3kKPCR4SNC-FCOu7
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/martiansideofthemoon/macro-action-rl&ved=2ahUKEwiUscPDl9mTAxUAHRAIHWYgLwo4FBAWegQIHRAB&usg=AOvVaw2oqG0h5eDDGmZjoFxOgk-N
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/lamda-bbo&ved=2ahUKEwiUscPDl9mTAxUAHRAIHWYgLwo4FBAWegQIFRAB&usg=AOvVaw0M3Wur012jLJYtrcNFe_vW
+https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://github.com/google-research/circuit_training&ved=2ahUKEwiUscPDl9mTAxUAHRAIHWYgLwo4FBAWegQIGhAB&usg=AOvVaw3P1xOb1DnXLsgnmnMqrc7u

@@ -49,6 +49,11 @@ from submissions.sa_placer import (
 WEIGHTS_DIR = Path(__file__).resolve().parent / "learning_weights"
 
 
+def _learning_device() -> torch.device:
+    """Prefer CUDA for GNN + differentiable refinement, fall back to CPU."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 # ── Differentiable HPWL with pin offsets and fixed contributions ───────────
 
 def _build_net_tensors(nets: list, device: torch.device):
@@ -752,6 +757,21 @@ class LearningPlacer(BasePlacer):
         torch.manual_seed(seed)
         np.random.seed(seed)
 
+        device = _learning_device()
+
+        # Move tensors to device for GPU-accelerated GNN + refinement
+        node_features = node_features.to(device)
+        adj_norm = adj_norm.to(device)
+        sizes = sizes.to(device)
+        half_w = half_w.to(device)
+        half_h = half_h.to(device)
+        movable = movable.to(device)
+        fixed_mask = fixed_mask.to(device)
+        orig_pos = orig_pos.to(device)
+        net_batches = [(idx.to(device), ox.to(device), oy.to(device),
+                        fb.to(device), w.to(device))
+                       for idx, ox, oy, fb, w in net_batches]
+
         in_dim = node_features.shape[1]
 
         # Extract plc grid parameters for RUDY congestion proxy
@@ -777,7 +797,7 @@ class LearningPlacer(BasePlacer):
         target_util = min(actual_util * 1.2, 0.85)
 
         # ── Phase 1: Load pre-trained GNN + fine-tune ───────────────────
-        gnn = self._load_pretrained(in_dim)
+        gnn = self._load_pretrained(in_dim).to(device)
         gnn_opt = torch.optim.Adam(gnn.parameters(), lr=self.gnn_lr)
         # LR warmup: ramp from 10% to full over first 10% of epochs
         warmup_epochs = max(1, self.gnn_finetune_epochs // 10)
@@ -843,7 +863,7 @@ class LearningPlacer(BasePlacer):
 
         with torch.no_grad():
             raw_pos = gnn(node_features, adj_norm)
-            init_pos = torch.zeros(n_hard, 2)
+            init_pos = torch.zeros(n_hard, 2, device=device)
             init_pos[:, 0] = raw_pos[:, 0] * (cw - sizes[:, 0]) + half_w
             init_pos[:, 1] = raw_pos[:, 1] * (ch - sizes[:, 1]) + half_h
             if fixed_mask.any():
@@ -926,12 +946,12 @@ class LearningPlacer(BasePlacer):
             refine_opt.step()
             scheduler.step()
 
-        # ── Phase 3: Legalization ───────────────────────────────────────
-        pos_np = best_pos.detach().numpy().astype(np.float64)
-        sizes_np = sizes.numpy().astype(np.float64)
+        # ── Phase 3: Legalization (CPU — interfaces with numpy/SA) ──────
+        pos_np = best_pos.detach().cpu().numpy().astype(np.float64)
+        sizes_np = sizes.cpu().numpy().astype(np.float64)
         half_w_np = sizes_np[:, 0] / 2
         half_h_np = sizes_np[:, 1] / 2
-        movable_np = movable.numpy()
+        movable_np = movable.cpu().numpy()
 
         sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
         sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
@@ -1051,6 +1071,9 @@ class LearningPlacer(BasePlacer):
         return legal_pos, proxy
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
+        device = _learning_device()
+        print(f"[LearningPlacer] Using device: {device}")
+
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
         ch = float(benchmark.canvas_height)
