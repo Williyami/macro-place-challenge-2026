@@ -35,7 +35,9 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from macro_place.benchmark import Benchmark
+from macro_place.objective import compute_proxy_cost
 from submissions.base import BasePlacer
+from submissions.analytical_placer import AnalyticalPlacer
 
 from submissions.sa_placer import (
     _load_plc,
@@ -282,6 +284,87 @@ def _analytical_place(
             best_pos = pos.data.clone()
 
     return best_pos.detach().cpu().numpy().astype(np.float64)
+
+
+def _gpu_post_refine(
+    benchmark: Benchmark,
+    plc,
+    init_pos_np: np.ndarray,
+    num_steps: int = 250,
+    lr: float = 0.08,
+    gamma: float = 4.0,
+    density_weight: float = 0.002,
+    overlap_weight: float = 0.08,
+    anchor_weight: float = 0.01,
+    seed: int = 42,
+):
+    """
+    Short GPU refinement pass after SA.
+
+    Keeps the SA solution as an anchor while letting differentiable losses
+    recover a bit of wirelength/density quality on the final placement.
+    """
+    torch.manual_seed(seed)
+    device = _hybrid_device()
+
+    n_hard = benchmark.num_hard_macros
+    cw = float(benchmark.canvas_width)
+    ch = float(benchmark.canvas_height)
+    sizes = benchmark.macro_sizes[:n_hard].clone().float().to(device)
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+    movable = benchmark.get_movable_mask()[:n_hard].to(device)
+    fixed_mask = ~movable
+
+    base_pos = torch.tensor(init_pos_np, dtype=torch.float32, device=device)
+    base_pos[:, 0] = torch.clamp(base_pos[:, 0], half_w, cw - half_w)
+    base_pos[:, 1] = torch.clamp(base_pos[:, 1], half_h, ch - half_h)
+
+    net_data = _build_net_tensors(plc, device)
+    if net_data is None:
+        return init_pos_np.astype(np.float64)
+
+    net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight = net_data
+    pos = base_pos.clone().detach().requires_grad_(True)
+    fixed_pos = base_pos.clone()
+    optimizer = torch.optim.Adam([pos], lr=lr)
+
+    best_pos = base_pos.clone()
+    best_cost = float("inf")
+
+    for _ in range(num_steps):
+        optimizer.zero_grad()
+
+        with torch.no_grad():
+            pos.data[fixed_mask] = fixed_pos[fixed_mask]
+
+        hpwl = _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, gamma=gamma)
+        density = _density_penalty(pos, sizes, cw, ch) * density_weight
+        overlap = _overlap_penalty(pos, sizes) * overlap_weight
+        anchor = ((pos[movable] - base_pos[movable]) ** 2).sum() * anchor_weight
+
+        loss = hpwl + density + overlap + anchor
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            pos.data[:, 0] = torch.clamp(pos.data[:, 0], half_w, cw - half_w)
+            pos.data[:, 1] = torch.clamp(pos.data[:, 1], half_h, ch - half_h)
+            pos.data[fixed_mask] = fixed_pos[fixed_mask]
+            loss_value = float(loss.item())
+            if loss_value < best_cost:
+                best_cost = loss_value
+                best_pos = pos.data.clone()
+
+    return best_pos.detach().cpu().numpy().astype(np.float64)
+
+
+def _proxy_score_pos(benchmark: Benchmark, plc, pos_hard: np.ndarray) -> float:
+    """Score a hard-macro placement with the ground-truth proxy evaluator."""
+    n_hard = benchmark.num_hard_macros
+    full_pos = benchmark.macro_positions.clone()
+    full_pos[:n_hard] = torch.tensor(pos_hard, dtype=torch.float32)
+    return float(compute_proxy_cost(full_pos, benchmark, plc)["proxy_cost"])
 
 
 # ── RUDY congestion estimation ─────────────────────────────────────────────
@@ -808,6 +891,8 @@ class HybridPlacer(BasePlacer):
         gamma: float = 5.0,
         density_weight: float = 0.001,
         overlap_weight: float = 0.05,
+        advanced_analytical_warmstart: bool = True,
+        analytical_candidates: int = 2,
         # SA phase
         sa_iters: int = 300_000,
         sa_t_start: float = 0.15,
@@ -816,6 +901,7 @@ class HybridPlacer(BasePlacer):
         reheat_factor: float = 3.0,
         congestion_weight: float = 50.0,
         density_sa_weight: float = 0.005,
+        post_refine_steps: int = 250,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
@@ -829,6 +915,8 @@ class HybridPlacer(BasePlacer):
         self.gamma = gamma
         self.density_weight = density_weight
         self.overlap_weight = overlap_weight
+        self.advanced_analytical_warmstart = advanced_analytical_warmstart
+        self.analytical_candidates = analytical_candidates
         self.sa_iters = sa_iters
         self.sa_t_start = sa_t_start
         self.sa_t_end = sa_t_end
@@ -836,6 +924,7 @@ class HybridPlacer(BasePlacer):
         self.reheat_factor = reheat_factor
         self.congestion_weight = congestion_weight
         self.density_sa_weight = density_sa_weight
+        self.post_refine_steps = post_refine_steps
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
@@ -866,7 +955,9 @@ class HybridPlacer(BasePlacer):
 
         # ── Phase 1: Analytical placement ──────────────────────────────────
         if plc is not None:
-            pos = _analytical_place(
+            candidate_positions = []
+
+            legacy_pos = _analytical_place(
                 benchmark, plc,
                 num_steps=self.analytical_steps,
                 lr=self.analytical_lr,
@@ -875,6 +966,37 @@ class HybridPlacer(BasePlacer):
                 overlap_weight=self.overlap_weight,
                 seed=self.seed,
             )
+            candidate_positions.append(legacy_pos)
+
+            if self.advanced_analytical_warmstart:
+                analytical = AnalyticalPlacer(
+                    seed=self.seed,
+                    iters=max(2500, self.analytical_steps * 3),
+                    lr=4.0,
+                    gamma_start=40.0,
+                    gamma_end=3.0,
+                    density_weight=max(self.density_weight * 6.0, 0.006),
+                    congestion_weight=0.0008,
+                    boundary_weight=0.015,
+                    overlap_weight_start=0.01,
+                    overlap_weight_end=18.0,
+                    num_candidates=max(1, self.analytical_candidates),
+                    sa_polish_iters=0,
+                )
+                analytical_full = analytical.place(benchmark)
+                candidate_positions.append(analytical_full[:n_hard].numpy().astype(np.float64))
+
+            best_init_score = float("inf")
+            pos = legacy_pos
+            for cand in candidate_positions:
+                legal_cand = _legalize(cand, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+                try:
+                    score = _proxy_score_pos(benchmark, plc, legal_cand)
+                except Exception:
+                    score = float("inf")
+                if score < best_init_score:
+                    best_init_score = score
+                    pos = legal_cand
         else:
             pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
 
@@ -921,6 +1043,24 @@ class HybridPlacer(BasePlacer):
                 reheat_threshold=self.reheat_threshold,
                 reheat_factor=self.reheat_factor,
             )
+
+        if plc is not None and self.post_refine_steps > 0:
+            sa_pos = pos.copy()
+            refined_pos = _gpu_post_refine(
+                benchmark,
+                plc,
+                pos,
+                num_steps=self.post_refine_steps,
+                seed=self.seed,
+            )
+            refined_pos = _legalize(refined_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+            try:
+                if _proxy_score_pos(benchmark, plc, refined_pos) <= _proxy_score_pos(benchmark, plc, sa_pos):
+                    pos = refined_pos
+                else:
+                    pos = sa_pos
+            except Exception:
+                pos = sa_pos
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()

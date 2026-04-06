@@ -23,6 +23,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+
+def _analytical_device() -> torch.device:
+    """Prefer CUDA for differentiable optimization when available."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # Ensure project root is on sys.path
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
@@ -551,15 +556,17 @@ class AnalyticalPlacer(BasePlacer):
         repulsion_weight=0.0,
         grid_cols=32,
         grid_rows=32,
+        device=None,
     ):
         torch.manual_seed(self.seed + seed_offset)
         np.random.seed(self.seed + seed_offset)
+        device = device or _analytical_device()
 
         pos = init_pos.clone()
         movable_idx = torch.where(movable_t)[0]
         if len(movable_idx) > 0:
-            noise_x = 0.02 * cw * (torch.rand(len(movable_idx)) - 0.5)
-            noise_y = 0.02 * ch * (torch.rand(len(movable_idx)) - 0.5)
+            noise_x = 0.02 * cw * (torch.rand(len(movable_idx), device=device) - 0.5)
+            noise_y = 0.02 * ch * (torch.rand(len(movable_idx), device=device) - 0.5)
             pos[movable_idx, 0] += noise_x
             pos[movable_idx, 1] += noise_y
 
@@ -568,10 +575,10 @@ class AnalyticalPlacer(BasePlacer):
         )
         pos_param = pos.clone().detach().requires_grad_(True)
 
-        lo_x = torch.tensor(half_w, dtype=torch.float32)
-        hi_x = torch.tensor([cw], dtype=torch.float32) - lo_x
-        lo_y = torch.tensor(half_h, dtype=torch.float32)
-        hi_y = torch.tensor([ch], dtype=torch.float32) - lo_y
+        lo_x = torch.tensor(half_w, dtype=torch.float32, device=device)
+        hi_x = torch.tensor([cw], dtype=torch.float32, device=device) - lo_x
+        lo_y = torch.tensor(half_h, dtype=torch.float32, device=device)
+        hi_y = torch.tensor([ch], dtype=torch.float32, device=device) - lo_y
 
         optimizer = torch.optim.Adam([pos_param], lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -650,7 +657,7 @@ class AnalyticalPlacer(BasePlacer):
                     best_loss = loss_value
                     best_snapshot = pos_param.detach().clone()
 
-        opt_pos = best_snapshot.detach().numpy().astype(np.float64)
+        opt_pos = best_snapshot.detach().cpu().numpy().astype(np.float64)
         sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
         sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
         legal_pos = _legalize(
@@ -673,6 +680,7 @@ class AnalyticalPlacer(BasePlacer):
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
+        device = _analytical_device()
 
         n_hard = benchmark.num_hard_macros
         cw = float(benchmark.canvas_width)
@@ -683,8 +691,8 @@ class AnalyticalPlacer(BasePlacer):
         half_h = sizes_np[:, 1] / 2
         movable_np = benchmark.get_movable_mask()[:n_hard].numpy()
 
-        sizes_t = benchmark.macro_sizes[:n_hard].clone().float()
-        movable_t = benchmark.get_movable_mask()[:n_hard]
+        sizes_t = benchmark.macro_sizes[:n_hard].clone().float().to(device)
+        movable_t = benchmark.get_movable_mask()[:n_hard].to(device)
         fixed_mask = ~movable_t
 
         # Load nets via PlacementCost
@@ -695,21 +703,21 @@ class AnalyticalPlacer(BasePlacer):
             nets = []
             macro_to_nets = [[] for _ in range(n_hard)]
 
-        net_data = _build_net_tensors(nets) if nets else None
+        net_data = _build_net_tensors(nets, device=device) if nets else None
 
         # Fixed 32×32 for differentiable density/congestion (stable vs evaluator grid)
         grid_cols, grid_rows = 32, 32
 
         # Initialise: try quadratic placement from connectivity, fall back to initial.plc
-        initial_pos = benchmark.macro_positions[:n_hard].clone().float()
+        initial_pos = benchmark.macro_positions[:n_hard].clone().float().to(device)
         fixed_pos = initial_pos[fixed_mask].clone()
 
         if nets:
             quad_pos_np = _quadratic_init(
                 nets, n_hard, movable_np,
-                initial_pos.numpy().astype(np.float64), cw, ch,
+                initial_pos.detach().cpu().numpy().astype(np.float64), cw, ch,
             )
-            quad_pos = torch.tensor(quad_pos_np, dtype=torch.float32)
+            quad_pos = torch.tensor(quad_pos_np, dtype=torch.float32, device=device)
         else:
             quad_pos = initial_pos.clone()
 
@@ -748,6 +756,7 @@ class AnalyticalPlacer(BasePlacer):
                 repulsion_weight=cfg["repulsion"],
                 grid_cols=grid_cols,
                 grid_rows=grid_rows,
+                device=device,
             )
             if fallback_full is None:
                 fallback_full = full_pos
