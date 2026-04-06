@@ -24,6 +24,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+
+def _sav2_device() -> torch.device:
+    """Prefer CUDA when available, otherwise fall back to CPU."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -975,6 +980,124 @@ def _update_soft_macros(pos_hard: np.ndarray, benchmark: Benchmark, plc) -> np.n
     return soft_pos
 
 
+def _proxy_score_hard_pos(
+    benchmark: Benchmark,
+    plc,
+    pos_hard: np.ndarray,
+) -> float:
+    """Evaluate a hard-macro placement with the proxy-cost scorer."""
+    n_hard = benchmark.num_hard_macros
+    full_pos = benchmark.macro_positions.clone()
+    full_pos[:n_hard] = torch.tensor(pos_hard, dtype=torch.float32)
+    return float(compute_proxy_cost(full_pos, benchmark, plc)["proxy_cost"])
+
+
+def _gpu_refine_with_fallback(
+    benchmark: Benchmark,
+    plc,
+    nets: list,
+    pos_hard: np.ndarray,
+    movable: np.ndarray,
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    num_steps: int,
+    seed: int,
+    lr: float = 0.08,
+    gamma: float = 4.0,
+    density_weight: float = 0.002,
+    overlap_weight: float = 0.05,
+    anchor_weight: float = 0.01,
+) -> np.ndarray:
+    """
+    GPU-assisted post refinement with automatic CPU fallback.
+
+    Uses differentiable HPWL + density + overlap around the SA solution, then
+    keeps the refined placement only if the evaluator proxy improves.
+    """
+    if num_steps <= 0 or plc is None or not nets:
+        return pos_hard
+
+    try:
+        from submissions.analytical_placer import (
+            _build_net_tensors as _build_diff_net_tensors,
+            _lse_hpwl as _diff_lse_hpwl,
+            _density_penalty as _diff_density_penalty,
+            _overlap_penalty as _diff_overlap_penalty,
+        )
+    except Exception:
+        return pos_hard
+
+    torch.manual_seed(seed)
+    device = _sav2_device()
+
+    n_hard = benchmark.num_hard_macros
+    sizes_t = torch.tensor(sizes, dtype=torch.float32, device=device)
+    movable_t = torch.tensor(movable, dtype=torch.bool, device=device)
+    fixed_mask = ~movable_t
+    base_pos = torch.tensor(pos_hard, dtype=torch.float32, device=device)
+
+    lo_x = torch.tensor(half_w, dtype=torch.float32, device=device)
+    hi_x = torch.tensor([cw], dtype=torch.float32, device=device) - lo_x
+    lo_y = torch.tensor(half_h, dtype=torch.float32, device=device)
+    hi_y = torch.tensor([ch], dtype=torch.float32, device=device) - lo_y
+
+    with torch.no_grad():
+        base_pos[:, 0].clamp_(lo_x, hi_x)
+        base_pos[:, 1].clamp_(lo_y, hi_y)
+
+    net_data = _build_diff_net_tensors(nets, device=device)
+    if net_data is None:
+        return pos_hard
+
+    pos = base_pos.clone().detach().requires_grad_(True)
+    fixed_pos = base_pos.clone()
+    optimizer = torch.optim.Adam([pos], lr=lr)
+
+    best_pos = base_pos.clone()
+    best_loss = float("inf")
+
+    for _ in range(num_steps):
+        optimizer.zero_grad()
+
+        with torch.no_grad():
+            pos.data[fixed_mask] = fixed_pos[fixed_mask]
+
+        loss = _diff_lse_hpwl(pos, net_data, gamma=gamma)
+        loss = loss + density_weight * _diff_density_penalty(
+            pos, sizes_t, cw, ch, grid_cols=32, grid_rows=32, target_scale=1.25
+        )
+        loss = loss + overlap_weight * _diff_overlap_penalty(pos, sizes_t, movable_t)
+        loss = loss + anchor_weight * ((pos[movable_t] - base_pos[movable_t]) ** 2).sum()
+
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            pos.data[:, 0].clamp_(lo_x, hi_x)
+            pos.data[:, 1].clamp_(lo_y, hi_y)
+            pos.data[fixed_mask] = fixed_pos[fixed_mask]
+            loss_value = float(loss.item())
+            if loss_value < best_loss:
+                best_loss = loss_value
+                best_pos = pos.data.clone()
+
+    refined = best_pos.detach().cpu().numpy().astype(np.float64)
+    refined = _legalize(refined, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+
+    try:
+        if _proxy_score_hard_pos(benchmark, plc, refined) <= _proxy_score_hard_pos(benchmark, plc, pos_hard):
+            return refined
+    except Exception:
+        return pos_hard
+
+    return pos_hard
+
+
 # ── placer class ─────────────────────────────────────────────────────────
 
 class SAV2Placer(BasePlacer):
@@ -991,6 +1114,7 @@ class SAV2Placer(BasePlacer):
     6. Greedy local search post-processing — steepest descent after SA.
     7. Greedy tail phase — final iterations at T=0 for pure refinement.
     8. Macro selection weighting — bias toward smaller (more mobile) macros.
+    9. GPU-assisted post-refinement with CPU fallback.
 
     Hyperparameters
     ---------------
@@ -1032,6 +1156,7 @@ class SAV2Placer(BasePlacer):
         greedy_tail_frac: float = 0.05,
         greedy_local_passes: int = 3,
         adaptive_moves: bool = True,
+        gpu_refine_steps: int = 120,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -1052,6 +1177,7 @@ class SAV2Placer(BasePlacer):
         self.greedy_tail_frac = greedy_tail_frac
         self.greedy_local_passes = greedy_local_passes
         self.adaptive_moves = adaptive_moves
+        self.gpu_refine_steps = gpu_refine_steps
         self.debug_snapshots = []
         self.debug_trace = []
 
@@ -1223,6 +1349,22 @@ class SAV2Placer(BasePlacer):
         # Greedy macro flipping
         if nets:
             _greedy_flip(best_pos, nets, macro_to_nets, movable, plc)
+            best_pos = _gpu_refine_with_fallback(
+                benchmark=benchmark,
+                plc=plc,
+                nets=nets,
+                pos_hard=best_pos,
+                movable=movable,
+                sizes=sizes,
+                half_w=half_w,
+                half_h=half_h,
+                sep_x=sep_x,
+                sep_y=sep_y,
+                cw=cw,
+                ch=ch,
+                num_steps=self.gpu_refine_steps,
+                seed=self.seed,
+            )
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
