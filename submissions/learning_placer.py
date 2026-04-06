@@ -696,7 +696,7 @@ class LearningPlacer(BasePlacer):
                  gamma_start: float = 50.0,
                  gamma_end: float = 2.0,
                  sa_iters: int = 600_000,
-                 num_starts: int = 3,
+                 num_starts: int = 2,
                  weights_path: str = None):
         self.seed = seed
         self.gnn_finetune_epochs = gnn_finetune_epochs
@@ -975,18 +975,9 @@ class LearningPlacer(BasePlacer):
                 benchmark=benchmark,
             )
 
-        # ── Phase 5: Proxy-aware greedy flipping ─────────────────────────
+        # ── Phase 5: HPWL greedy flipping (fast, per-start) ──────────────
         if nets_raw:
-            _proxy_greedy_flip(legal_pos, nets_raw, macro_to_nets,
-                               movable_np, benchmark, plc, n_hard)
-
-        # ── Phase 6: Congestion-targeted local search ──────────────────
-        if nets_raw:
-            legal_pos = _congestion_local_search(
-                legal_pos, nets_raw, macro_to_nets, movable_np,
-                sizes_np, cw, ch, n_hard, benchmark, plc,
-                max_rounds=2, attempts_per_macro=8,
-            )
+            _greedy_flip(legal_pos, nets_raw, macro_to_nets, movable_np, plc)
 
         proxy = self._eval_proxy(legal_pos, benchmark, plc, n_hard)
         return legal_pos, proxy
@@ -1054,15 +1045,7 @@ class LearningPlacer(BasePlacer):
             )
 
         if nets_raw:
-            _proxy_greedy_flip(legal_pos, nets_raw, macro_to_nets,
-                               movable_np, benchmark, plc, n_hard)
-
-        if nets_raw:
-            legal_pos = _congestion_local_search(
-                legal_pos, nets_raw, macro_to_nets, movable_np,
-                sizes_np, cw, ch, n_hard, benchmark, plc,
-                max_rounds=2, attempts_per_macro=8,
-            )
+            _greedy_flip(legal_pos, nets_raw, macro_to_nets, movable_np, plc)
 
         proxy = self._eval_proxy(legal_pos, benchmark, plc, n_hard)
         return legal_pos, proxy
@@ -1132,6 +1115,23 @@ class LearningPlacer(BasePlacer):
             t_start_factor=0.20, t_end_factor=0.0005, sa_iter_mult=1.5,
         )
         _update_best(pos_np, proxy)
+
+        # ── Final post-processing on the winner only ──────────────────
+        sizes_np = sizes.numpy().astype(np.float64)
+        movable_np = movable.numpy()
+
+        # Proxy-aware greedy flip (more expensive but picks better flips)
+        if nets_raw:
+            _proxy_greedy_flip(best_pos, nets_raw, macro_to_nets,
+                               movable_np, benchmark, plc, n_hard)
+
+        # Congestion-targeted local search (shift macros out of hotspots)
+        if nets_raw:
+            best_pos = _congestion_local_search(
+                best_pos, nets_raw, macro_to_nets, movable_np,
+                sizes_np, float(cw), float(ch), n_hard, benchmark, plc,
+                max_rounds=3, attempts_per_macro=8,
+            )
 
         full_pos = benchmark.macro_positions.clone()
         full_pos[:n_hard] = torch.tensor(best_pos, dtype=torch.float32)
