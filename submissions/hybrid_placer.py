@@ -8,7 +8,7 @@ Improvements over v2 (avg 1.6972):
   - Periodic full congestion recompute to correct incremental drift.
 
 Strategy:
-  1. Analytical phase: Differentiable LSE-HPWL + density + overlap with Adam.
+  1. Analytical phase: Differentiable LSE-HPWL + density + overlap with Adam (GPU-accelerated when CUDA is available).
   2. Legalization: Minimum-displacement snap to resolve overlaps.
   3. SA phase: Congestion-aware SA with RUDY routing estimation + reheating.
 
@@ -24,6 +24,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+
+def _hybrid_device() -> torch.device:
+    """Prefer CUDA for the analytical phase, otherwise fall back to CPU."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
@@ -47,7 +52,7 @@ from submissions.sa_placer import (
 
 # ── Differentiable HPWL (log-sum-exp) ──────────────────────────────────────
 
-def _build_net_tensors(plc):
+def _build_net_tensors(plc, device):
     """
     Build padded tensor representation of nets for differentiable HPWL.
     """
@@ -103,12 +108,12 @@ def _build_net_tensors(plc):
     N = len(raw_nets)
     max_pins = max(len(rn[1]) for rn in raw_nets)
 
-    net_mask = torch.zeros(N, max_pins, dtype=torch.bool)
-    net_hard = torch.zeros(N, max_pins, dtype=torch.long)
-    net_is_hard = torch.zeros(N, max_pins, dtype=torch.bool)
-    net_ox = torch.zeros(N, max_pins, dtype=torch.float32)
-    net_oy = torch.zeros(N, max_pins, dtype=torch.float32)
-    net_weight = torch.zeros(N, dtype=torch.float32)
+    net_mask = torch.zeros(N, max_pins, dtype=torch.bool, device=device)
+    net_hard = torch.zeros(N, max_pins, dtype=torch.long, device=device)
+    net_is_hard = torch.zeros(N, max_pins, dtype=torch.bool, device=device)
+    net_ox = torch.zeros(N, max_pins, dtype=torch.float32, device=device)
+    net_oy = torch.zeros(N, max_pins, dtype=torch.float32, device=device)
+    net_weight = torch.zeros(N, dtype=torch.float32, device=device)
 
     for i, (w, pins) in enumerate(raw_nets):
         net_weight[i] = w
@@ -150,11 +155,12 @@ def _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, 
 
 def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=16):
     """Gaussian-smoothed density penalty to spread macros apart."""
+    device = pos.device
     cell_w = canvas_w / grid_n
     cell_h = canvas_h / grid_n
-    cx = torch.linspace(cell_w / 2, canvas_w - cell_w / 2, grid_n)
-    cy = torch.linspace(cell_h / 2, canvas_h - cell_h / 2, grid_n)
-    grid_cx, grid_cy = torch.meshgrid(cx, cy, indexing='ij')
+    cx = torch.linspace(cell_w / 2, canvas_w - cell_w / 2, grid_n, device=device)
+    cy = torch.linspace(cell_h / 2, canvas_h - cell_h / 2, grid_n, device=device)
+    grid_cx, grid_cy = torch.meshgrid(cx, cy, indexing="ij")
     grid_cx = grid_cx.reshape(1, -1)
     grid_cy = grid_cy.reshape(1, -1)
 
@@ -179,7 +185,7 @@ def _overlap_penalty(pos, sizes):
     """Differentiable overlap penalty between all pairs of macros."""
     n = pos.shape[0]
     if n <= 1:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=pos.device)
 
     half_w = sizes[:, 0] / 2
     half_h = sizes[:, 1] / 2
@@ -193,7 +199,7 @@ def _overlap_penalty(pos, sizes):
     overlap_x = torch.nn.functional.softplus(sep_x - torch.abs(dx), beta=5.0)
     overlap_y = torch.nn.functional.softplus(sep_y - torch.abs(dy), beta=5.0)
 
-    mask = torch.triu(torch.ones(n, n, dtype=torch.bool), diagonal=1)
+    mask = torch.triu(torch.ones(n, n, dtype=torch.bool, device=pos.device), diagonal=1)
     return (overlap_x * overlap_y * mask.float()).sum()
 
 
@@ -215,23 +221,24 @@ def _analytical_place(
     Uses fixed gamma=5 (proven to work well) with ramping density/overlap.
     """
     torch.manual_seed(seed)
+    device = _hybrid_device()
 
     n_hard = benchmark.num_hard_macros
     cw = float(benchmark.canvas_width)
     ch = float(benchmark.canvas_height)
-    sizes = benchmark.macro_sizes[:n_hard].clone().float()
+    sizes = benchmark.macro_sizes[:n_hard].clone().float().to(device)
     half_w = sizes[:, 0] / 2
     half_h = sizes[:, 1] / 2
-    movable = benchmark.get_movable_mask()[:n_hard]
+    movable = benchmark.get_movable_mask()[:n_hard].to(device)
     fixed_mask = ~movable
 
-    init_pos = benchmark.macro_positions[:n_hard].clone().float()
+    init_pos = benchmark.macro_positions[:n_hard].clone().float().to(device)
     init_pos[:, 0] = torch.clamp(init_pos[:, 0], half_w, cw - half_w)
     init_pos[:, 1] = torch.clamp(init_pos[:, 1], half_h, ch - half_h)
 
-    net_data = _build_net_tensors(plc)
+    net_data = _build_net_tensors(plc, device)
     if net_data is None:
-        return init_pos.numpy().astype(np.float64)
+        return init_pos.detach().cpu().numpy().astype(np.float64)
 
     net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight = net_data
 
@@ -274,7 +281,7 @@ def _analytical_place(
             best_cost = cost_val
             best_pos = pos.data.clone()
 
-    return best_pos.numpy().astype(np.float64)
+    return best_pos.detach().cpu().numpy().astype(np.float64)
 
 
 # ── RUDY congestion estimation ─────────────────────────────────────────────
@@ -783,6 +790,8 @@ def _sa_refine_congestion(
 
 class HybridPlacer(BasePlacer):
     """
+    GPU-accelerated in the analytical phase when CUDA is available.
+
     Hybrid placer v2: analytical gradient init → SA refinement with reheating.
 
     Phase 1 (analytical): 1200 Adam steps with annealing gamma, density, overlap.

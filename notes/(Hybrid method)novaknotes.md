@@ -1,10 +1,10 @@
 # Novak's Notes — HybridPlacer Results
 
-## Method: Analytical -> SA Pipeline (`submissions/hybrid_placer.py`)
+## Method: Analytical -> SA Pipeline (GPU-accelerated analytical phase) (`submissions/hybrid_placer.py`)
 
 Three-phase hybrid approach:
 
-### Phase 1: Analytical Placement (~1000 Adam steps, ~2s)
+### Phase 1: Analytical Placement (GPU-accelerated when CUDA is available, ~1000 Adam steps, ~2s)
 - Differentiable **log-sum-exp (LSE) HPWL** approximation for global wirelength
 - **Gaussian density penalty** on a grid to spread macros and reduce congestion
 - **Differentiable overlap penalty** using softplus to push macros apart

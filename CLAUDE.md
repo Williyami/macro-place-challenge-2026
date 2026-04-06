@@ -25,7 +25,7 @@ Every time you run benchmarks, you MUST do all three of these steps:
 Each team member has their own notes file:
 - Learning/RL placer (Person 3): `notes/(RL method)eklundnotes.md`
 - SA + Analytical placer (Person 1): `notes/(SA + Analytical method) Omnellnotes.md`
-- Hybrid placer (Person 2): `notes/(Hybrid method)novaknotes.md`
+- Hybrid placer (GPU-accelerated analytical phase, Person 2): `notes/(Hybrid method)novaknotes.md`
 
 Add a new `## Date — Description` section with a markdown table matching the existing format in that file. Include: Benchmark, Proxy, WL, Density, Congestion, Time, and vs SA baseline comparison.
 
