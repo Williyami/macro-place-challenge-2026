@@ -19,7 +19,7 @@ Generated from the note files in this directory.
 | A2 | Analytical Placer | 2026-04-04 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7394 | 1.7394 | 598.68 | (SA + Analytical method) Omnellnotes.md |
 | A3 | Analytical Placer | 2026-04-05 | Analytical Placer v3 (PLACER_METHOD=analytical) | full_suite | 17 | 1.7232 | 1.7232 | 1362.00 | (SA + Analytical method) Omnellnotes.md |
 | H1 | HybridPlacer | 2026-04-03 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6972 | 1.6972 | 1492.67 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 34 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
+| H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | 2026-04-06 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6966 | 1.6966 | 3998.65 | (Hybrid method)novaknotes.md |
 
 ## Benchmark-Level Records
@@ -248,39 +248,22 @@ Generated from the note files in this directory.
 | H1 | HybridPlacer | ibm17 | 1.7813 | 0.052 | 1.004 | 2.454 | 123.00 | (Hybrid method)novaknotes.md |
 | H1 | HybridPlacer | ibm18 | 1.8320 | 0.053 | 1.111 | 2.447 | 62.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm01 | 1.2477 | 0.066 | 1.034 | 1.330 | 11.28 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm01 | 1.2362 | 0.065 | 1.035 | 1.308 | 98.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm02 | 1.7787 | 0.080 | 0.991 | 2.407 | 17.21 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm02 | 1.7591 | 0.079 | 0.982 | 2.378 | 109.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm03 | 1.7756 | 0.079 | 1.140 | 2.254 | 12.08 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm03 | 1.7819 | 0.078 | 1.147 | 2.261 | 103.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm04 | 1.6133 | 0.069 | 1.057 | 2.032 | 14.20 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm04 | 1.6181 | 0.068 | 1.060 | 2.040 | 101.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm06 | 2.0305 | 0.063 | 1.053 | 2.882 | 8.20 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm06 | 2.0324 | 0.063 | 1.050 | 2.889 | 73.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm07 | 1.6873 | 0.064 | 1.083 | 2.162 | 9.58 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm07 | 1.6864 | 0.064 | 1.084 | 2.160 | 111.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm08 | 1.8384 | 0.067 | 1.135 | 2.407 | 14.96 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm08 | 1.8342 | 0.067 | 1.141 | 2.394 | 121.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm09 | 1.2531 | 0.057 | 1.006 | 1.386 | 10.07 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm09 | 1.2505 | 0.057 | 1.000 | 1.387 | 121.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm10 | 1.6922 | 0.059 | 0.996 | 2.269 | 47.64 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm10 | 1.6951 | 0.059 | 0.994 | 2.279 | 263.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm11 | 1.4209 | 0.054 | 1.089 | 1.646 | 12.23 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm11 | 1.4258 | 0.054 | 1.086 | 1.658 | 109.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm12 | 1.9854 | 0.062 | 1.067 | 2.780 | 29.96 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm12 | 1.9837 | 0.062 | 1.066 | 2.778 | 175.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm13 | 1.6461 | 0.053 | 1.114 | 2.073 | 13.71 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm13 | 1.6342 | 0.053 | 1.116 | 2.048 | 111.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm14 | 1.7276 | 0.050 | 1.113 | 2.241 | 42.95 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm14 | 1.7251 | 0.050 | 1.107 | 2.242 | 283.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm15 | 1.8139 | 0.058 | 1.143 | 2.370 | 21.77 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm15 | 1.8139 | 0.057 | 1.142 | 2.371 | 137.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm16 | 1.7381 | 0.047 | 1.050 | 2.331 | 23.69 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm16 | 1.7451 | 0.047 | 1.044 | 2.352 | 158.00 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm17 | 1.7802 | 0.052 | 1.003 | 2.453 | 24.28 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm17 | 1.7833 | 0.052 | 1.006 | 2.457 | - | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm18 | 1.8326 | 0.053 | 1.106 | 2.454 | 10.89 | (Hybrid method)novaknotes.md |
-| H2 | HybridPlacer | ibm18 | 1.8340 | 0.053 | 1.109 | 2.453 | 61.00 | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | ibm01 | 1.2362 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | ibm02 | 1.7591 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H3 | HybridPlacer | ibm03 | 1.7848 | - | - | - | - | (Hybrid method)novaknotes.md |

@@ -178,12 +178,19 @@ def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
         total_runtime_s = float(runtime_match.group(1)) if runtime_match else None
 
         benchmarks: list[BenchmarkRow] = []
+        # Only parse the FIRST table in the section (stop after AVG row)
+        in_table = False
         for line in section.splitlines():
             if not line.startswith("|"):
+                if in_table and benchmarks:
+                    break  # left the first table, stop
                 continue
+            in_table = True
             parts = [part.strip() for part in line.strip().strip("|").split("|")]
-            if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
+            if parts[0] in {"Benchmark", "-----------"}:
                 continue
+            if parts[0] == "**AVG**":
+                break  # end of first table
             if not re.fullmatch(r"ibm\d+", parts[0]):
                 continue
             # Support both the original detailed hybrid table:
