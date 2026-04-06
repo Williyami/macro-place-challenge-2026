@@ -624,8 +624,8 @@ class LearningPlacer(BasePlacer):
                                                 grid_col=grid_col, grid_row=grid_row,
                                                 target_util=target_util) * (cw * ch) * 0.02
             loss_ov = _smooth_overlap_penalty(pos, sizes, movable) * (0.1 + 0.5 * frac)
-            # RUDY-based congestion — weight ramped to match proxy formula (0.5 * congestion)
-            cong_weight = 0.1 + 0.4 * frac
+            # RUDY-based congestion — start higher to push congestion down early
+            cong_weight = 0.2 + 0.5 * frac
             loss_cong = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs) * cong_weight
 
             loss = loss_wl + loss_den + loss_ov + loss_cong
@@ -700,11 +700,11 @@ class LearningPlacer(BasePlacer):
             if in_stage2:
                 # Stage 2: high congestion + density weight, maintain WL
                 den_weight = 0.08 + 0.12 * stage_frac
-                cong_weight = 0.5 + 0.5 * stage_frac  # up to 1.0
+                cong_weight = 0.6 + 0.6 * stage_frac  # up to 1.2
             else:
-                # Stage 1: low congestion, focus on WL + overlap
+                # Stage 1: moderate congestion, focus on WL + overlap
                 den_weight = 0.03 + 0.05 * stage_frac
-                cong_weight = 0.1 + 0.15 * stage_frac  # up to 0.25
+                cong_weight = 0.15 + 0.2 * stage_frac  # up to 0.35
 
             loss_den = _smooth_density_penalty(pos, sizes, cw, ch,
                                                 grid_col=grid_col, grid_row=grid_row,
