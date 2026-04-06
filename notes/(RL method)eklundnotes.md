@@ -205,3 +205,33 @@ Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC,
 Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
 **Result:** Much better than the SA baseline, but still behind our best logged SA V1 run (1.4803) and the current learning placer (1.5587).
 The GPU-assisted fallback path is integrated and validated, but this first SA V2 full-suite run is still congestion-limited on ibm04/ibm10/ibm17.
+
+## 2026-04-07 — SA V2: fast full-suite rerun (`--no-media`)
+
+Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC, greedy local search, and GPU-assisted post-refinement
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.2515 | 0.088 | 0.934 | 1.393 | 23.43s | BETTER (1.3166) |
+| ibm02 | 1.6672 | 0.086 | 0.768 | 2.395 | 14.96s | BETTER (1.9072) |
+| ibm03 | 1.5042 | 0.087 | 0.834 | 2.000 | 15.90s | BETTER (1.7401) |
+| ibm04 | 1.5122 | 0.078 | 0.882 | 1.987 | 97.32s | WORSE (1.5037) |
+| ibm06 | 1.7702 | 0.066 | 0.803 | 2.607 | 15.51s | BETTER (2.5057) |
+| ibm07 | 1.5731 | 0.068 | 0.892 | 2.119 | 21.37s | BETTER (2.0229) |
+| ibm08 | 1.6782 | 0.076 | 0.922 | 2.282 | 31.19s | BETTER (1.9239) |
+| ibm09 | 1.2071 | 0.061 | 0.902 | 1.390 | 22.93s | BETTER (1.3875) |
+| ibm10 | 1.5059 | 0.076 | 0.740 | 2.120 | 48.62s | BETTER (2.1108) |
+| ibm11 | 1.3292 | 0.058 | 0.916 | 1.627 | 28.50s | BETTER (1.7111) |
+| ibm12 | 1.7301 | 0.066 | 0.804 | 2.525 | 45.90s | BETTER (2.8261) |
+| ibm13 | 1.5038 | 0.057 | 0.946 | 1.948 | 28.28s | BETTER (1.9141) |
+| ibm14 | 1.6763 | 0.054 | 1.004 | 2.240 | 57.27s | BETTER (2.2750) |
+| ibm15 | 1.6607 | 0.059 | 0.998 | 2.205 | 46.20s | BETTER (2.3000) |
+| ibm16 | 1.6149 | 0.051 | 0.897 | 2.231 | 58.27s | BETTER (2.2337) |
+| ibm17 | 1.7691 | 0.054 | 0.969 | 2.461 | 74.23s | BETTER (3.6726) |
+| ibm18 | 1.8011 | 0.053 | 1.055 | 2.440 | 39.07s | BETTER (2.7755) |
+| **AVG** | **1.5738** | | | | 668.95s | **SA: 2.1251** |
+
+Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
+**Result:** Quality is essentially tied with the previous SA V2 full-suite run (1.5697 -> 1.5738, +0.3%), but runtime improved dramatically (3478.35s -> 668.95s, about 5.2x faster).
+This keeps SA V2 clearly ahead of the SA baseline while making it much more practical under the competition runtime limit.

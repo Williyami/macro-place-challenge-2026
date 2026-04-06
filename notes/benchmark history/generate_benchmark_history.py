@@ -55,7 +55,7 @@ def _safe_float(s: str) -> float | None:
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
     text = path.read_text()
-    blocks = re.split(r"(?=^## )", text, flags=re.M)
+    blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
 
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
@@ -499,7 +499,7 @@ def parse_sa_v2() -> tuple[list[RunRecord], list[dict[str, object]]]:
     if not path.exists():
         return [], []
     text = path.read_text()
-    blocks = re.split(r"(?=^## )", text, flags=re.M)
+    blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
 
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
