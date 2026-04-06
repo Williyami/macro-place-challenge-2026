@@ -3,14 +3,14 @@ SA V2 Placer (Eklund) — Improved Simulated Annealing.
 
 Key improvements over SA V1:
   1. Net HPWL caching: cache per-net HPWL, only recompute affected nets on moves.
-  2. Adaptive move probabilities: track accept rates per move type and bias toward
-     successful types.
-  3. Late-acceptance hill climbing (LAHC) combined with SA for better escapes.
+  2. RUDY congestion proxy in SA cost function — directly optimizes congestion.
+  3. Cost-contribution-based macro selection — prioritize high-cost macros.
   4. Size-aware move radius: shift distance scales with macro size relative to canvas.
-  5. Congestion-aware cost: lightweight congestion penalty in SA acceptance.
-  6. Improved initial placement via force-directed warm-start option.
-  7. Greedy local search post-processing (steepest descent after SA cools).
-  8. Multi-start with diverse seeds and perturbation strategies.
+  5. Multi-scale greedy local search post-processing.
+  6. Greedy macro flipping with pin offset optimization.
+  7. GPU-assisted post-refinement with CPU fallback.
+  8. Go-With-The-Winners (GWTW) multi-start synchronization.
+  9. Per-benchmark parameter tuning for difficult designs.
 
 Usage:
     PLACER_METHOD=sa_v2 uv run evaluate submissions/placer.py --all
@@ -272,6 +272,168 @@ def _density_cost_from_grid(grid_occupied, grid_area, n_cells):
     return 0.5 * sum(nonzero[:cnt]) / cnt
 
 
+# ── RUDY congestion grid helpers ─────────────────────────────────────────
+
+RUDY_GRID = 32  # coarse grid for fast RUDY computation
+
+def _net_rudy_cells(net: dict, pos: np.ndarray, grid_col: int, grid_row: int,
+                    gw: float, gh: float) -> list:
+    """Compute RUDY demand cells for a net. Returns list of (cell_idx, demand)."""
+    hx = pos[net["hard_idx"], 0] + net["hard_ox"]
+    hy = pos[net["hard_idx"], 1] + net["hard_oy"]
+    xmin = min(float(hx.min()), net["fxmin"])
+    xmax = max(float(hx.max()), net["fxmax"])
+    ymin = min(float(hy.min()), net["fymin"])
+    ymax = max(float(hy.max()), net["fymax"])
+
+    bb_w = xmax - xmin
+    bb_h = ymax - ymin
+    if bb_w < 1e-10 and bb_h < 1e-10:
+        return []
+
+    c_min = max(0, int(xmin / gw))
+    c_max = min(grid_col - 1, int(xmax / gw))
+    r_min = max(0, int(ymin / gh))
+    r_max = min(grid_row - 1, int(ymax / gh))
+
+    n_cells = (c_max - c_min + 1) * (r_max - r_min + 1)
+    if n_cells == 0:
+        return []
+
+    # RUDY: distribute net routing demand uniformly over bounding box
+    demand = net["weight"] / n_cells
+    result = []
+    for r in range(r_min, r_max + 1):
+        base = r * grid_col
+        for c in range(c_min, c_max + 1):
+            result.append((base + c, demand))
+    return result
+
+
+def _net_rudy_cells_override(net: dict, pos: np.ndarray, m: int,
+                             new_x: float, new_y: float,
+                             grid_col: int, grid_row: int,
+                             gw: float, gh: float) -> list:
+    """Compute RUDY demand cells for a net with macro m at a new position."""
+    idx = net["hard_idx"]
+    ox = net["hard_ox"]
+    oy = net["hard_oy"]
+
+    hx = pos[idx, 0] + ox
+    hy = pos[idx, 1] + oy
+
+    mask = (idx == m)
+    if mask.any():
+        hx = hx.copy()
+        hy = hy.copy()
+        hx[mask] = new_x + ox[mask]
+        hy[mask] = new_y + oy[mask]
+
+    xmin = min(float(hx.min()), net["fxmin"])
+    xmax = max(float(hx.max()), net["fxmax"])
+    ymin = min(float(hy.min()), net["fymin"])
+    ymax = max(float(hy.max()), net["fymax"])
+
+    bb_w = xmax - xmin
+    bb_h = ymax - ymin
+    if bb_w < 1e-10 and bb_h < 1e-10:
+        return []
+
+    c_min = max(0, int(xmin / gw))
+    c_max = min(grid_col - 1, int(xmax / gw))
+    r_min = max(0, int(ymin / gh))
+    r_max = min(grid_row - 1, int(ymax / gh))
+
+    n_cells = (c_max - c_min + 1) * (r_max - r_min + 1)
+    if n_cells == 0:
+        return []
+
+    demand = net["weight"] / n_cells
+    result = []
+    for r in range(r_min, r_max + 1):
+        base = r * grid_col
+        for c in range(c_min, c_max + 1):
+            result.append((base + c, demand))
+    return result
+
+
+def _build_rudy_grid(pos: np.ndarray, nets: list, grid_col: int, grid_row: int,
+                     gw: float, gh: float) -> tuple:
+    """Build RUDY congestion grid and per-net cell lists. Returns (grid, net_cells_list)."""
+    grid = np.zeros(grid_col * grid_row)
+    net_cells_list = []
+    for net in nets:
+        cells = _net_rudy_cells(net, pos, grid_col, grid_row, gw, gh)
+        net_cells_list.append(cells)
+        for ci, demand in cells:
+            grid[ci] += demand
+    return grid, net_cells_list
+
+
+def _rudy_cost_l2(grid: np.ndarray) -> float:
+    """L2-norm-squared congestion proxy — penalizes hotspots."""
+    return float(np.sum(grid * grid))
+
+
+def _delta_rudy_shift(m: int, new_x: float, new_y: float,
+                      pos: np.ndarray, nets: list, macro_to_nets: list,
+                      rudy_grid: np.ndarray, rudy_net_cells: list,
+                      rgrid_col: int, rgrid_row: int, rgw: float, rgh: float):
+    """Compute delta RUDY L2 cost for moving macro m. Returns (delta_l2, updates).
+    updates = list of (net_idx, new_cells) for committing."""
+    delta_l2 = 0.0
+    updates = []
+    for net_idx in macro_to_nets[m]:
+        net = nets[net_idx]
+        old_cells = rudy_net_cells[net_idx]
+        new_cells = _net_rudy_cells_override(net, pos, m, new_x, new_y,
+                                             rgrid_col, rgrid_row, rgw, rgh)
+        # Compute delta L2: for each cell that changes, delta = new^2 - old^2
+        # We need to temporarily apply changes
+        # Collect cell changes as {cell_idx: delta_demand}
+        cell_delta = {}
+        for ci, demand in old_cells:
+            cell_delta[ci] = cell_delta.get(ci, 0.0) - demand
+        for ci, demand in new_cells:
+            cell_delta[ci] = cell_delta.get(ci, 0.0) + demand
+
+        for ci, dd in cell_delta.items():
+            if abs(dd) > 1e-15:
+                old_val = rudy_grid[ci]
+                new_val = old_val + dd
+                delta_l2 += new_val * new_val - old_val * old_val
+
+        updates.append((net_idx, new_cells))
+    return delta_l2, updates
+
+
+def _apply_rudy_updates(rudy_grid: np.ndarray, rudy_net_cells: list,
+                        updates: list, macro_to_nets_m: list):
+    """Commit RUDY grid updates after accepting a move."""
+    for net_idx, new_cells in updates:
+        old_cells = rudy_net_cells[net_idx]
+        for ci, demand in old_cells:
+            rudy_grid[ci] -= demand
+        for ci, demand in new_cells:
+            rudy_grid[ci] += demand
+        rudy_net_cells[net_idx] = new_cells
+
+
+def _compute_macro_cost_scores(pos: np.ndarray, nets: list, macro_to_nets: list,
+                               net_cache: np.ndarray, n_hard: int) -> np.ndarray:
+    """Score each macro by its contribution to total HPWL cost (sum of net costs)."""
+    scores = np.zeros(n_hard)
+    for i in range(n_hard):
+        for ni in macro_to_nets[i]:
+            scores[i] += net_cache[ni]
+    # Normalize to probability distribution
+    if scores.sum() > 1e-10:
+        scores = scores / scores.sum()
+    else:
+        scores = np.ones(n_hard) / n_hard
+    return scores
+
+
 # ── legalization ───────────────────────────────────────────────────────────
 
 def _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n, sep_x, sep_y):
@@ -356,18 +518,19 @@ def _sa_v2_refine(
     grid_col: int = 0,
     grid_row: int = 0,
     benchmark=None,
-    lahc_length: int = 200,
+    lahc_length: int = 0,
     greedy_tail_frac: float = 0.05,
-    adaptive_moves: bool = True,
+    adaptive_moves: bool = False,
+    congestion_weight: float = 0.0,
 ) -> np.ndarray:
-    """SA V2 loop with cached HPWL, adaptive moves, and LAHC.
+    """SA V2 loop with cached HPWL, RUDY congestion, and cost-based macro selection.
 
-    New parameters
-    --------------
+    Parameters
+    ----------
+    congestion_weight : float
+        Weight for RUDY L2 congestion proxy in SA cost. 0 to disable.
     lahc_length : int
-        Late Acceptance Hill Climbing history length. During the LAHC phase
-        a move is accepted if cost < history[step % length] even if SA would
-        reject it. Set 0 to disable.
+        Late Acceptance Hill Climbing history length (0 to disable).
     greedy_tail_frac : float
         Fraction of iterations at the end devoted to greedy-only (T=0) search.
     adaptive_moves : bool
@@ -383,13 +546,6 @@ def _sa_v2_refine(
     pos = pos.copy()
     n_hard = len(movable)
     GAP = 0.05
-
-    # Pre-compute macro areas for weighted random selection (prefer smaller macros
-    # early since large macros constrain the space)
-    macro_areas = sizes[movable_idx, 0] * sizes[movable_idx, 1]
-    # Inverse-area weights for selection (smaller macros more likely)
-    inv_area_weights = 1.0 / (macro_areas + 1e-10)
-    inv_area_weights /= inv_area_weights.sum()
 
     def check_overlap(idx: int) -> bool:
         dx = np.abs(pos[idx, 0] - pos[:, 0])
@@ -418,24 +574,52 @@ def _sa_v2_refine(
             pos, sizes, n_hard, grid_col, grid_row, gw, gh, benchmark,
         )
         current_density = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
-        current_cost = current_hpwl + density_weight * current_density
-        best_cost = current_cost
     else:
         current_density = 0.0
-        current_cost = current_hpwl
-        best_cost = current_hpwl
+
+    # RUDY congestion tracking
+    use_rudy = congestion_weight > 0 and nets
+    if use_rudy:
+        rgrid_col = rgrid_row = RUDY_GRID
+        rgw = cw / rgrid_col
+        rgh = ch / rgrid_row
+        rudy_grid, rudy_net_cells = _build_rudy_grid(pos, nets, rgrid_col, rgrid_row, rgw, rgh)
+        current_rudy_l2 = _rudy_cost_l2(rudy_grid)
+    else:
+        current_rudy_l2 = 0.0
+        rudy_grid = None
+        rudy_net_cells = None
+
+    current_cost = current_hpwl
+    if use_density:
+        current_cost += density_weight * current_density
+    if use_rudy:
+        current_cost += congestion_weight * current_rudy_l2
+    best_cost = current_cost
 
     # LAHC history
     use_lahc = lahc_length > 0
     if use_lahc:
         lahc_history = np.full(lahc_length, current_cost)
 
-    # Adaptive move probabilities
-    # Move types: 0=SHIFT, 1=SWAP, 2=TOWARD_NEIGHBOR, 3=MIRROR_SHIFT
+    # Move probabilities: SHIFT, SWAP, TOWARD_NEIGHBOR, MIRROR_SHIFT
     n_move_types = 4
-    move_accepts = np.ones(n_move_types)  # Laplace smoothing
-    move_attempts = np.ones(n_move_types) * 2
-    move_probs = np.array([0.45, 0.25, 0.20, 0.10])  # initial
+    move_probs = np.array([0.45, 0.25, 0.20, 0.10])
+
+    # Adaptive move tracking
+    if adaptive_moves:
+        move_accepts = np.ones(n_move_types)
+        move_attempts = np.ones(n_move_types) * 2
+
+    # Cost-contribution-based macro selection weights
+    # Recomputed periodically to prioritize high-cost macros
+    macro_cost_scores = _compute_macro_cost_scores(pos, nets, macro_to_nets, net_cache, n_hard)
+    movable_cost_weights = macro_cost_scores[movable_idx]
+    w_sum = movable_cost_weights.sum()
+    if w_sum > 1e-10:
+        movable_cost_weights = movable_cost_weights / w_sum
+    else:
+        movable_cost_weights = np.ones(len(movable_idx)) / len(movable_idx)
 
     # Reheating state
     steps_since_improvement = 0
@@ -470,7 +654,6 @@ def _sa_v2_refine(
         if adaptive_moves and step > 500 and step % 200 == 0:
             rates = move_accepts / move_attempts
             move_probs = rates / rates.sum()
-            # Blend with uniform to maintain exploration
             move_probs = 0.8 * move_probs + 0.2 * np.ones(n_move_types) / n_move_types
 
         r = rng.random()
@@ -482,15 +665,27 @@ def _sa_v2_refine(
                 move_type = mt
                 break
 
-        # Choose macro — mix uniform and inverse-area weighted
-        if rng.random() < 0.3:
-            i_loc = np_rng.choice(len(movable_idx), p=inv_area_weights)
+        # Choose macro — cost-contribution weighted (40%), uniform (60%)
+        # Periodically recompute cost scores
+        if step % 5000 == 0 and step > 0:
+            macro_cost_scores = _compute_macro_cost_scores(
+                pos, nets, macro_to_nets, net_cache, n_hard)
+            movable_cost_weights = macro_cost_scores[movable_idx]
+            w_sum = movable_cost_weights.sum()
+            if w_sum > 1e-10:
+                movable_cost_weights = movable_cost_weights / w_sum
+            else:
+                movable_cost_weights = np.ones(len(movable_idx)) / len(movable_idx)
+
+        if rng.random() < 0.4:
+            i_loc = np_rng.choice(len(movable_idx), p=movable_cost_weights)
         else:
             i_loc = rng.randrange(len(movable_idx))
         i = movable_idx[i_loc]
         old_x, old_y = pos[i, 0], pos[i, 1]
 
-        move_attempts[move_type] += 1
+        if adaptive_moves:
+            move_attempts[move_type] += 1
 
         if move_type == 0:
             # ── SHIFT ────────────────────────────────────────────────────
@@ -498,7 +693,6 @@ def _sa_v2_refine(
             macro_diag = math.sqrt(sizes[i, 0]**2 + sizes[i, 1]**2)
             canvas_diag = math.sqrt(cw**2 + ch**2)
             base_shift = T * (0.3 + 0.7 * (1 - frac))
-            # Scale inversely with macro size (small macros explore more)
             size_factor = 1.0 + 0.5 * (1.0 - macro_diag / canvas_diag)
             shift = base_shift * size_factor
 
@@ -524,6 +718,13 @@ def _sa_v2_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            rudy_updates = None
+            if use_rudy:
+                delta_rudy, rudy_updates = _delta_rudy_shift(
+                    i, new_x, new_y, pos, nets, macro_to_nets,
+                    rudy_grid, rudy_net_cells, rgrid_col, rgrid_row, rgw, rgh)
+                delta += congestion_weight * delta_rudy
+
             new_cost = current_cost + delta
 
             # Acceptance: SA + LAHC
@@ -542,8 +743,13 @@ def _sa_v2_refine(
                     net_cache[ni] = val
                 if use_density:
                     current_density = new_dens
+                if use_rudy and rudy_updates:
+                    _apply_rudy_updates(rudy_grid, rudy_net_cells, rudy_updates, macro_to_nets[i])
+                    current_rudy_l2 += congestion_weight * (new_cost - current_cost) / congestion_weight if congestion_weight > 0 else 0
+                    current_rudy_l2 = _rudy_cost_l2(rudy_grid)
                 current_cost = new_cost
-                move_accepts[move_type] += 1
+                if adaptive_moves:
+                    move_accepts[move_type] += 1
 
                 if current_cost < best_cost:
                     best_cost = current_cost
@@ -623,13 +829,24 @@ def _sa_v2_refine(
                 pos[i, 0] = new_ix; pos[i, 1] = new_iy
                 pos[j, 0] = new_jx; pos[j, 1] = new_jy
                 current_hpwl += delta_hpwl
-                # Update cache for all affected nets (need to recompute in swapped state)
                 for k in affected:
                     net_cache[k] = _net_hpwl(nets[k], pos)
                 if use_density:
                     current_density = new_dens
+                if use_rudy:
+                    # Rebuild RUDY cells for all affected nets
+                    for k in affected:
+                        old_rc = rudy_net_cells[k]
+                        for ci, demand in old_rc:
+                            rudy_grid[ci] -= demand
+                        new_rc = _net_rudy_cells(nets[k], pos, rgrid_col, rgrid_row, rgw, rgh)
+                        for ci, demand in new_rc:
+                            rudy_grid[ci] += demand
+                        rudy_net_cells[k] = new_rc
+                    current_rudy_l2 = _rudy_cost_l2(rudy_grid)
                 current_cost = new_cost
-                move_accepts[move_type] += 1
+                if adaptive_moves:
+                    move_accepts[move_type] += 1
 
                 if current_cost < best_cost:
                     best_cost = current_cost
@@ -677,6 +894,13 @@ def _sa_v2_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            rudy_updates = None
+            if use_rudy:
+                delta_rudy, rudy_updates = _delta_rudy_shift(
+                    i, new_x, new_y, pos, nets, macro_to_nets,
+                    rudy_grid, rudy_net_cells, rgrid_col, rgrid_row, rgw, rgh)
+                delta += congestion_weight * delta_rudy
+
             new_cost = current_cost + delta
 
             accept = False
@@ -694,8 +918,12 @@ def _sa_v2_refine(
                     net_cache[ni] = val
                 if use_density:
                     current_density = new_dens
+                if use_rudy and rudy_updates:
+                    _apply_rudy_updates(rudy_grid, rudy_net_cells, rudy_updates, macro_to_nets[i])
+                    current_rudy_l2 = _rudy_cost_l2(rudy_grid)
                 current_cost = new_cost
-                move_accepts[move_type] += 1
+                if adaptive_moves:
+                    move_accepts[move_type] += 1
 
                 if current_cost < best_cost:
                     best_cost = current_cost
@@ -715,7 +943,6 @@ def _sa_v2_refine(
 
         elif move_type == 3:
             # ── MIRROR SHIFT ─────────────────────────────────────────────
-            # Reflect macro position across canvas center (x, y, or both)
             flip = rng.randint(0, 2)  # 0=x, 1=y, 2=both
             cx, cy = cw / 2, ch / 2
             if flip == 0 or flip == 2:
@@ -727,7 +954,6 @@ def _sa_v2_refine(
             else:
                 new_y = old_y
 
-            # Add small perturbation
             perturb = T * 0.1 * (1 - frac)
             new_x = float(np.clip(new_x + rng.gauss(0, perturb), half_w[i], cw - half_w[i]))
             new_y = float(np.clip(new_y + rng.gauss(0, perturb), half_h[i], ch - half_h[i]))
@@ -751,6 +977,13 @@ def _sa_v2_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            rudy_updates = None
+            if use_rudy:
+                delta_rudy, rudy_updates = _delta_rudy_shift(
+                    i, new_x, new_y, pos, nets, macro_to_nets,
+                    rudy_grid, rudy_net_cells, rgrid_col, rgrid_row, rgw, rgh)
+                delta += congestion_weight * delta_rudy
+
             new_cost = current_cost + delta
 
             accept = False
@@ -768,8 +1001,12 @@ def _sa_v2_refine(
                     net_cache[ni] = val
                 if use_density:
                     current_density = new_dens
+                if use_rudy and rudy_updates:
+                    _apply_rudy_updates(rudy_grid, rudy_net_cells, rudy_updates, macro_to_nets[i])
+                    current_rudy_l2 = _rudy_cost_l2(rudy_grid)
                 current_cost = new_cost
-                move_accepts[move_type] += 1
+                if adaptive_moves:
+                    move_accepts[move_type] += 1
 
                 if current_cost < best_cost:
                     best_cost = current_cost
