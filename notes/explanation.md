@@ -8,7 +8,7 @@ time by setting the PLACER_METHOD env var:
     PLACER_METHOD=analytical  uv run evaluate submissions/placer.py --all
     PLACER_METHOD=hybrid      uv run evaluate submissions/placer.py --all
     PLACER_METHOD=learning    uv run evaluate submissions/placer.py --all
-    PLACER_METHOD=will_seed   uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=sa_v2       uv run evaluate submissions/placer.py --all
 
 Compare your method against others frequently to see where you stand. The goal is
 to find the best approach across all methods — we'll submit whichever wins.
