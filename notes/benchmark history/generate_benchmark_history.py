@@ -182,20 +182,33 @@ def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
             if not line.startswith("|"):
                 continue
             parts = [part.strip() for part in line.strip().strip("|").split("|")]
-            if len(parts) < 10:
-                continue
             if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
                 continue
             if not re.fullmatch(r"ibm\d+", parts[0]):
+                continue
+            # Support both the original detailed hybrid table:
+            # Benchmark | Proxy | WL | Density | Congestion | ... | Time
+            # and later summary-only tables:
+            # Benchmark | Proxy | SA Baseline | RePlAce | vs SA | vs RePlAce | Overlaps
+            wl = density = congestion = time_s = None
+            if len(parts) >= 10:
+                wl = _safe_float(parts[2])
+                density = _safe_float(parts[3])
+                congestion = _safe_float(parts[4])
+                time_s = parse_time_seconds(parts[9])
+            elif len(parts) >= 7:
+                wl = density = congestion = None
+                time_s = None
+            else:
                 continue
             benchmarks.append(
                 BenchmarkRow(
                     benchmark=parts[0],
                     proxy=float(parts[1]),
-                    wl=float(parts[2]),
-                    density=float(parts[3]),
-                    congestion=float(parts[4]),
-                    time_s=parse_time_seconds(parts[9]),
+                    wl=wl,
+                    density=density,
+                    congestion=congestion,
+                    time_s=time_s,
                 )
             )
 
