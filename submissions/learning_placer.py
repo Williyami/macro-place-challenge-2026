@@ -504,8 +504,8 @@ class LearningPlacer(BasePlacer):
                  refine_lr: float = 3.0,
                  gamma_start: float = 50.0,
                  gamma_end: float = 2.0,
-                 sa_iters: int = 500_000,
-                 num_starts: int = 5,
+                 sa_iters: int = 600_000,
+                 num_starts: int = 3,
                  weights_path: str = None):
         self.seed = seed
         self.gnn_finetune_epochs = gnn_finetune_epochs
@@ -533,6 +533,20 @@ class LearningPlacer(BasePlacer):
                 model_state.update(filtered)
                 gnn.load_state_dict(model_state)
         return gnn
+
+    def _eval_proxy(self, pos_np: np.ndarray, benchmark: Benchmark,
+                    plc, n_hard: int) -> float:
+        """Evaluate actual proxy cost using the ground-truth evaluator."""
+        if plc is None:
+            return float('inf')
+        try:
+            from macro_place.objective import compute_proxy_cost, _set_placement
+            full_pos = benchmark.macro_positions.clone()
+            full_pos[:n_hard] = torch.tensor(pos_np, dtype=torch.float32)
+            costs = compute_proxy_cost(full_pos, benchmark, plc)
+            return costs["proxy_cost"]
+        except Exception:
+            return float('inf')
 
     def _run_one_seed(self, seed: int, benchmark: Benchmark,
                       nets_raw: list, macro_to_nets: list,
@@ -620,10 +634,14 @@ class LearningPlacer(BasePlacer):
             gnn_opt.step()
             gnn_scheduler.step()
 
-            # Track best GNN checkpoint
+            # Track best GNN checkpoint (proxy-aligned: WL + 0.5*den + 0.5*cong)
             with torch.no_grad():
                 ov = _smooth_overlap_penalty(pos, sizes, movable).item()
-                cost = loss_wl.item() + loss_cong.item()
+                den_raw = _smooth_density_penalty(pos, sizes, cw, ch,
+                                                  grid_col=grid_col, grid_row=grid_row,
+                                                  target_util=target_util).item()
+                cong_raw = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs).item()
+                cost = loss_wl.item() + 0.5 * den_raw + 0.5 * cong_raw
                 if ov < 1.0 and cost < best_gnn_cost:
                     best_gnn_cost = cost
                     best_gnn_state = {k: v.clone() for k, v in gnn.state_dict().items()}
@@ -698,7 +716,12 @@ class LearningPlacer(BasePlacer):
 
             with torch.no_grad():
                 ov_area = _smooth_overlap_penalty(pos, sizes, movable).item()
-                cost = loss_wl.item() + loss_cong.item()  # track WL + congestion
+                # Proxy-aligned tracking: WL + 0.5*density + 0.5*congestion
+                den_raw = _smooth_density_penalty(pos, sizes, cw, ch,
+                                                  grid_col=grid_col, grid_row=grid_row,
+                                                  target_util=target_util).item()
+                cong_raw = _rudy_congestion_proxy(pos, sizes, **rudy_kwargs).item()
+                cost = loss_wl.item() + 0.5 * den_raw + 0.5 * cong_raw
                 if ov_area < 1.0 and cost < best_cost:
                     best_cost = cost
                     best_pos = pos.detach().clone()
@@ -765,8 +788,8 @@ class LearningPlacer(BasePlacer):
         if nets_raw:
             _greedy_flip(legal_pos, nets_raw, macro_to_nets, movable_np, plc)
 
-        hpwl = _compute_total_hpwl(legal_pos, nets_raw) if nets_raw else float('inf')
-        return legal_pos, hpwl
+        proxy = self._eval_proxy(legal_pos, benchmark, plc, n_hard)
+        return legal_pos, proxy
 
     def _run_from_initial(self, seed: int, benchmark: Benchmark,
                           nets_raw: list, macro_to_nets: list,
@@ -830,8 +853,8 @@ class LearningPlacer(BasePlacer):
         if nets_raw:
             _greedy_flip(legal_pos, nets_raw, macro_to_nets, movable_np, plc)
 
-        hpwl = _compute_total_hpwl(legal_pos, nets_raw) if nets_raw else float('inf')
-        return legal_pos, hpwl
+        proxy = self._eval_proxy(legal_pos, benchmark, plc, n_hard)
+        return legal_pos, proxy
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         n_hard = benchmark.num_hard_macros
@@ -864,27 +887,27 @@ class LearningPlacer(BasePlacer):
                         neighbors[int(a)].append(int(b))
 
         best_pos = None
-        best_hpwl = float('inf')
+        best_proxy = float('inf')
 
         # GNN multi-starts
         for s in range(self.num_starts):
             seed = self.seed + s * 1000
-            pos_np, hpwl = self._run_one_seed(
+            pos_np, proxy = self._run_one_seed(
                 seed, benchmark, nets_raw, macro_to_nets, net_batches,
                 adj_norm, node_features, sizes, half_w, half_h,
                 movable, fixed_mask, orig_pos, cw, ch, n_hard, neighbors, plc,
             )
-            if hpwl < best_hpwl:
-                best_hpwl = hpwl
+            if proxy < best_proxy:
+                best_proxy = proxy
                 best_pos = pos_np
 
         # Extra start from initial.plc (no GNN, just SA polish)
-        pos_np, hpwl = self._run_from_initial(
+        pos_np, proxy = self._run_from_initial(
             self.seed + 99000, benchmark, nets_raw, macro_to_nets,
             sizes, movable, orig_pos, cw, ch, n_hard, neighbors, plc,
         )
-        if hpwl < best_hpwl:
-            best_hpwl = hpwl
+        if proxy < best_proxy:
+            best_proxy = proxy
             best_pos = pos_np
 
         full_pos = benchmark.macro_positions.clone()
