@@ -1,16 +1,19 @@
 """
-Hybrid Placer v3 — Analytical init → Congestion-aware SA refinement.
+Hybrid Placer v4 — Congestion-aware analytical init → Density-tracking SA.
 
-Improvements over v2 (avg 1.6972):
-  - RUDY congestion estimation in SA: incremental routing demand tracking
-    on the evaluator's grid, matching L-shaped 2-pin routing + macro blockage.
-  - SA acceptance uses combined cost: delta_hpwl + cong_weight * delta_congestion.
-  - Periodic full congestion recompute to correct incremental drift.
+Improvements over v3 (avg 1.6966):
+  - Differentiable RUDY congestion proxy in analytical phase (net bbox routing demand)
+  - Evaluator-matched density penalty (sigmoid bin membership, top-10% ABU)
+  - Macro halos for routing channel reservation during optimization
+  - SA density tracking with calibrated weight (co-optimises HPWL + density)
+  - Greedy pin flipping post-processing for free HPWL improvement
+  - 1500 analytical steps (up from 1000)
 
 Strategy:
-  1. Analytical phase: Differentiable LSE-HPWL + density + overlap with Adam (GPU-accelerated when CUDA is available).
+  1. Analytical phase: Differentiable LSE-HPWL + density + congestion + overlap with Adam (GPU-accelerated).
   2. Legalization: Minimum-displacement snap to resolve overlaps.
-  3. SA phase: Congestion-aware SA with RUDY routing estimation + reheating.
+  3. SA phase: HPWL + density co-optimization with reheating.
+  4. Greedy flip: Try mirror orientations for each macro to reduce HPWL.
 
 Usage:
     uv run evaluate submissions/hybrid_placer.py
@@ -24,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def _hybrid_device() -> torch.device:
@@ -49,6 +53,10 @@ from submissions.sa_placer import (
     _net_hpwl_override,
     _delta_hpwl,
     _compute_total_hpwl,
+    _greedy_flip,
+    _build_density_grid,
+    _density_cost_from_grid,
+    _macro_cell_overlaps,
 )
 
 
@@ -155,32 +163,125 @@ def _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, 
     return hpwl.sum()
 
 
-def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=16):
-    """Gaussian-smoothed density penalty to spread macros apart."""
+def _density_penalty(pos, sizes, canvas_w, canvas_h, grid_n=32):
+    """Evaluator-matched density penalty using sigmoid bin membership.
+
+    Penalizes top-10% densest cells (matching the evaluator's formula).
+    Uses softplus overlap computation for smooth gradients.
+    """
     device = pos.device
     cell_w = canvas_w / grid_n
     cell_h = canvas_h / grid_n
+    grid_area = cell_w * cell_h
+
+    n = pos.shape[0]
+    if n == 0:
+        return torch.tensor(0.0, device=device)
+
+    # Grid cell boundaries
+    bin_x_lo = torch.linspace(0, canvas_w - cell_w, grid_n, device=device)
+    bin_x_hi = bin_x_lo + cell_w
+    bin_y_lo = torch.linspace(0, canvas_h - cell_h, grid_n, device=device)
+    bin_y_hi = bin_y_lo + cell_h
+
+    # Macro boundaries
+    half_w = sizes[:, 0] / 2
+    half_h = sizes[:, 1] / 2
+    mac_x_lo = pos[:, 0] - half_w
+    mac_x_hi = pos[:, 0] + half_w
+    mac_y_lo = pos[:, 1] - half_h
+    mac_y_hi = pos[:, 1] + half_h
+
+    steep = 10.0 / max(cell_w, cell_h)
+
+    # [N, G] overlap in each dimension
+    ov_x = F.softplus(
+        torch.min(mac_x_hi.unsqueeze(1), bin_x_hi.unsqueeze(0))
+        - torch.max(mac_x_lo.unsqueeze(1), bin_x_lo.unsqueeze(0)),
+        beta=steep,
+    )
+    ov_y = F.softplus(
+        torch.min(mac_y_hi.unsqueeze(1), bin_y_hi.unsqueeze(0))
+        - torch.max(mac_y_lo.unsqueeze(1), bin_y_lo.unsqueeze(0)),
+        beta=steep,
+    )
+
+    # Density per cell: sum of overlap areas / grid_area → [G_x, G_y]
+    density = torch.einsum("ni,nj->ij", ov_x, ov_y) / grid_area
+
+    # Penalize top 10% (matching evaluator)
+    flat = density.flatten()
+    k = max(1, flat.numel() // 10)
+    top_vals = flat.topk(k).values
+
+    total_area = (sizes[:, 0] * sizes[:, 1]).sum()
+    target = float(total_area / (canvas_w * canvas_h)) * 1.35
+    excess = torch.clamp(top_vals - target, min=0)
+    return excess.pow(2).sum() + 0.5 * top_vals.pow(2).mean()
+
+
+def _congestion_penalty(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy,
+                        net_weight, canvas_w, canvas_h, grid_n=32):
+    """Differentiable RUDY congestion proxy: net bounding-box routing demand.
+
+    Estimates per-cell routing demand from net bounding boxes using sigmoid
+    membership functions. Penalizes cells that exceed a headroom threshold,
+    matching the evaluator's ABU-style congestion metric.
+    """
+    device = pos.device
+    cell_w = canvas_w / grid_n
+    cell_h = canvas_h / grid_n
+
+    # Compute pin positions
+    hard_x = pos[net_hard, 0]
+    hard_y = pos[net_hard, 1]
+    is_h = net_is_hard.float()
+
+    pin_x = is_h * (hard_x + net_ox) + (1 - is_h) * net_ox
+    pin_y = is_h * (hard_y + net_oy) + (1 - is_h) * net_oy
+
+    BIG = 1e6
+    pin_x_active = pin_x.clone(); pin_x_active[~net_mask] = BIG
+    pin_x_active2 = pin_x.clone(); pin_x_active2[~net_mask] = -BIG
+    pin_y_active = pin_y.clone(); pin_y_active[~net_mask] = BIG
+    pin_y_active2 = pin_y.clone(); pin_y_active2[~net_mask] = -BIG
+
+    net_xmin = pin_x_active.min(dim=1).values
+    net_xmax = pin_x_active2.max(dim=1).values
+    net_ymin = pin_y_active.min(dim=1).values
+    net_ymax = pin_y_active2.max(dim=1).values
+
+    # Grid cell centers
     cx = torch.linspace(cell_w / 2, canvas_w - cell_w / 2, grid_n, device=device)
     cy = torch.linspace(cell_h / 2, canvas_h - cell_h / 2, grid_n, device=device)
-    grid_cx, grid_cy = torch.meshgrid(cx, cy, indexing="ij")
-    grid_cx = grid_cx.reshape(1, -1)
-    grid_cy = grid_cy.reshape(1, -1)
 
-    sigma_x = sizes[:, 0:1] * 0.5 + cell_w * 0.5
-    sigma_y = sizes[:, 1:2] * 0.5 + cell_h * 0.5
+    sharpness = 4.0 / max(cell_w, cell_h)
 
-    dx = pos[:, 0:1] - grid_cx
-    dy = pos[:, 1:2] - grid_cy
+    # Sigmoid membership: is grid cell center inside the net bounding box?
+    in_x = (torch.sigmoid(sharpness * (cx.unsqueeze(0) - net_xmin.unsqueeze(1)))
+            * torch.sigmoid(sharpness * (net_xmax.unsqueeze(1) - cx.unsqueeze(0))))
+    in_y = (torch.sigmoid(sharpness * (cy.unsqueeze(0) - net_ymin.unsqueeze(1)))
+            * torch.sigmoid(sharpness * (net_ymax.unsqueeze(1) - cy.unsqueeze(0))))
 
-    weight_x = torch.exp(-0.5 * (dx / sigma_x) ** 2)
-    weight_y = torch.exp(-0.5 * (dy / sigma_y) ** 2)
-    area = sizes[:, 0:1] * sizes[:, 1:2]
+    # Weighted routing demand per cell
+    demand = torch.einsum("ni,nj,n->ij", in_x, in_y, net_weight)
 
-    density = (area * weight_x * weight_y).sum(dim=0)
+    # Target: average demand with headroom
+    total_demand = (net_weight * ((net_xmax - net_xmin) / canvas_w)
+                    * ((net_ymax - net_ymin) / canvas_h)).sum()
+    target = total_demand / (grid_n * grid_n) * 2.0
 
-    target = (sizes[:, 0] * sizes[:, 1]).sum() / (grid_n * grid_n)
-    overflow = torch.relu(density - target * 2.0)
-    return overflow.sum()
+    excess = torch.clamp(demand - target, min=0)
+    return (excess ** 2).sum()
+
+
+def _halo_sizes(sizes, area_scale=0.10, base_scale=0.03):
+    """Inflate macro sizes to reserve routing channels during optimization."""
+    area = sizes[:, 0] * sizes[:, 1]
+    area_norm = area / area.max().clamp(min=1e-6)
+    halo = base_scale + area_scale * area_norm.sqrt()
+    scale = 1.0 + halo.unsqueeze(1)
+    return sizes * scale
 
 
 def _overlap_penalty(pos, sizes):
@@ -210,17 +311,23 @@ def _overlap_penalty(pos, sizes):
 def _analytical_place(
     benchmark: Benchmark,
     plc,
-    num_steps: int = 1000,
+    num_steps: int = 1500,
     lr: float = 0.5,
     gamma: float = 5.0,
-    density_weight: float = 0.001,
+    density_weight: float = 0.003,
     overlap_weight: float = 0.05,
+    congestion_weight: float = 0.0005,
+    use_halos: bool = True,
     seed: int = 42,
 ):
     """
-    Gradient-based placement using differentiable HPWL + density + overlap.
+    Gradient-based placement using differentiable HPWL + density + congestion + overlap.
 
-    Uses fixed gamma=5 (proven to work well) with ramping density/overlap.
+    v4 improvements:
+      - Evaluator-matched density penalty (sigmoid bin membership, top-10%)
+      - Differentiable RUDY congestion proxy (net bbox routing demand)
+      - Macro halos for routing channel reservation
+      - More optimization steps for better convergence
     """
     torch.manual_seed(seed)
     device = _hybrid_device()
@@ -233,6 +340,9 @@ def _analytical_place(
     half_h = sizes[:, 1] / 2
     movable = benchmark.get_movable_mask()[:n_hard].to(device)
     fixed_mask = ~movable
+
+    # Halo-inflated sizes for density/overlap (reserves routing channels)
+    eff_sizes = _halo_sizes(sizes) if use_halos else sizes
 
     init_pos = benchmark.macro_positions[:n_hard].clone().float().to(device)
     init_pos[:, 0] = torch.clamp(init_pos[:, 0], half_w, cw - half_w)
@@ -261,15 +371,22 @@ def _analytical_place(
         # HPWL loss
         hpwl = _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, gamma=gamma)
 
-        # Density penalty (ramp up over first 30%)
+        # Density penalty with halo sizes (ramp up over first 30%)
         density_ramp = min(1.0, step / (num_steps * 0.3))
-        density = _density_penalty(pos, sizes, cw, ch) * density_weight * density_ramp
+        density = _density_penalty(pos, eff_sizes, cw, ch) * density_weight * density_ramp
 
-        # Overlap penalty (ramp up over first 20%)
+        # Congestion penalty (ramp up over first 40%)
+        cong_ramp = min(1.0, step / (num_steps * 0.4))
+        congestion = _congestion_penalty(
+            pos, net_mask, net_hard, net_is_hard, net_ox, net_oy,
+            net_weight, cw, ch,
+        ) * congestion_weight * cong_ramp
+
+        # Overlap penalty with halo sizes (ramp up over first 20%)
         overlap_ramp = min(1.0, step / (num_steps * 0.2))
-        overlap = _overlap_penalty(pos, sizes) * overlap_weight * overlap_ramp
+        overlap = _overlap_penalty(pos, eff_sizes) * overlap_weight * overlap_ramp
 
-        loss = hpwl + density + overlap
+        loss = hpwl + density + congestion + overlap
         loss.backward()
         optimizer.step()
 
@@ -873,24 +990,25 @@ def _sa_refine_congestion(
 
 class HybridPlacer(BasePlacer):
     """
-    GPU-accelerated in the analytical phase when CUDA is available.
+    Hybrid placer v4: congestion-aware analytical → density-tracking SA → greedy flip.
 
-    Hybrid placer v2: analytical gradient init → SA refinement with reheating.
-
-    Phase 1 (analytical): 1200 Adam steps with annealing gamma, density, overlap.
+    Phase 1 (analytical): 1500 Adam steps with HPWL + density + congestion + overlap.
     Phase 2 (legalize): Minimum-displacement overlap resolution.
-    Phase 3 (SA): 150K iterations with reheating on stagnation.
+    Phase 3 (SA): 300K iterations with HPWL + density co-optimization + reheating.
+    Phase 4 (flip): Greedy pin orientation flipping for HPWL reduction.
     """
 
     def __init__(
         self,
         seed: int = 42,
         # Analytical phase
-        analytical_steps: int = 1000,
+        analytical_steps: int = 1500,
         analytical_lr: float = 0.5,
         gamma: float = 5.0,
-        density_weight: float = 0.001,
+        density_weight: float = 0.003,
         overlap_weight: float = 0.05,
+        analytical_congestion_weight: float = 0.0005,
+        use_halos: bool = True,
         advanced_analytical_warmstart: bool = False,
         analytical_candidates: int = 2,
         # SA phase
@@ -899,8 +1017,7 @@ class HybridPlacer(BasePlacer):
         sa_t_end: float = 0.001,
         reheat_threshold: int = 10_000,
         reheat_factor: float = 3.0,
-        congestion_weight: float = 50.0,
-        density_sa_weight: float = 0.005,
+        sa_density_boost: float = 1.0,
         post_refine_steps: int = 0,
         # Soft macro FD
         run_fd: bool = False,
@@ -915,6 +1032,8 @@ class HybridPlacer(BasePlacer):
         self.gamma = gamma
         self.density_weight = density_weight
         self.overlap_weight = overlap_weight
+        self.analytical_congestion_weight = analytical_congestion_weight
+        self.use_halos = use_halos
         self.advanced_analytical_warmstart = advanced_analytical_warmstart
         self.analytical_candidates = analytical_candidates
         self.sa_iters = sa_iters
@@ -922,8 +1041,7 @@ class HybridPlacer(BasePlacer):
         self.sa_t_end = sa_t_end
         self.reheat_threshold = reheat_threshold
         self.reheat_factor = reheat_factor
-        self.congestion_weight = congestion_weight
-        self.density_sa_weight = density_sa_weight
+        self.sa_density_boost = sa_density_boost
         self.post_refine_steps = post_refine_steps
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
@@ -964,6 +1082,8 @@ class HybridPlacer(BasePlacer):
                 gamma=self.gamma,
                 density_weight=self.density_weight,
                 overlap_weight=self.overlap_weight,
+                congestion_weight=self.analytical_congestion_weight,
+                use_halos=self.use_halos,
                 seed=self.seed,
             )
             candidate_positions.append(legacy_pos)
@@ -1021,13 +1141,34 @@ class HybridPlacer(BasePlacer):
         else:
             nets, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        neighbors = [[] for _ in range(n_hard)]
+        neighbors = [set() for _ in range(n_hard)]
         for net in nets:
             idx = net["hard_idx"]
             for a in idx:
                 for b in idx:
                     if a != b:
-                        neighbors[a].append(int(b))
+                        neighbors[a].add(int(b))
+        neighbors = [list(s) for s in neighbors]
+
+        # ── Density weight calibration (SA co-optimises HPWL + density) ───
+        grid_col = grid_row = 0
+        density_w = 0.0
+        if plc is not None and nets:
+            try:
+                grid_col, grid_row = plc.grid_col, plc.grid_row
+                if grid_col > 0 and grid_row > 0:
+                    from macro_place.objective import _set_placement
+                    full_init = benchmark.macro_positions.clone()
+                    full_init[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+                    _set_placement(plc, full_init, benchmark)
+                    wl_norm = plc.get_cost()
+                    raw_hpwl = _compute_total_hpwl(pos, nets)
+                    if wl_norm > 1e-10 and raw_hpwl > 1e-10:
+                        density_w = 0.5 * raw_hpwl / wl_norm
+                        density_w *= self.sa_density_boost
+            except Exception:
+                grid_col = grid_row = 0
+                density_w = 0.0
 
         if nets:
             pos = _sa_refine(
@@ -1042,7 +1183,15 @@ class HybridPlacer(BasePlacer):
                 t_end_factor=self.sa_t_end,
                 reheat_threshold=self.reheat_threshold,
                 reheat_factor=self.reheat_factor,
+                density_weight=density_w,
+                grid_col=grid_col,
+                grid_row=grid_row,
+                benchmark=benchmark,
             )
+
+        # ── Greedy pin flipping (free HPWL improvement) ───────────────────
+        if nets and plc is not None:
+            _greedy_flip(pos, nets, macro_to_nets, movable, plc)
 
         if plc is not None and self.post_refine_steps > 0:
             sa_pos = pos.copy()

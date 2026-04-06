@@ -23,8 +23,8 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 8 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
 | 9 | **Learning Placer (ours)** | **1.5587** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
 | 10 | **SA V2 (Eklund, ours)** | **1.5697** | **1.2071** | **1.8050** | **0** | **3478.35s total** |  |
-| 11 | "UT Austin" - RH (DREAMPlace) | 1.6037 | — | — | 0 | 4.5s/bench |  |
-| 12 | **HybridPlacer (ours)** | **1.6966** | **1.2362** | **2.0324** | **0** | **3998.65s total** |  |
+| 11 | **HybridPlacer v4 (ours)** | **1.5954** | **1.1387** | **1.9132** | **0** | **12369.19s total** |  |
+| 12 | "UT Austin" - RH (DREAMPlace) | 1.6037 | — | — | 0 | 4.5s/bench |  |
 | 13 | **Analytical Placer (ours)** | **1.7394** | **1.3438** | **2.0684** | **0** | **598.68s total** |  |
 | 14 | "UT Austin" - CT (PROXYCost) | 1.8706 | — | — | 0 | 187s/bench |  |
 | — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — | ✅ |
@@ -40,7 +40,7 @@ Benchmark-history tracking for the note sections lives in:
 
 ![Benchmark history summary](notes/benchmark%20history/benchmark_history_full_suite.png)
 
-Latest update includes the new SA V2 `V1` run from `2026-04-06`.
+Latest update includes the new HybridPlacer `H4` run from `2026-04-07` and SA V2 `V1` from `2026-04-06`.
 
 ## About Macro Placement
 

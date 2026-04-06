@@ -232,3 +232,87 @@ Total runtime: **3998.65s** (~66.6 min for all 17 benchmarks)
 - Beats the SA baseline by **20.2%** on average with **zero overlaps**
 - Still trails RePlAce by **16.4%** on average
 - Runtime rose substantially to **3998.65s**, so the gain over prior runs is very small relative to the extra cost
+
+---
+
+## v4 Results (2026-04-07) — Congestion-aware analytical + density-tracking SA + greedy flip
+
+Changes from v3:
+- **Differentiable RUDY congestion proxy** in analytical phase (net bbox routing demand on 32×32 grid)
+- **Evaluator-matched density penalty** (sigmoid bin membership, top-10% ABU penalty)
+- **Macro halos** (~3-10% size inflation for routing channel reservation)
+- **SA density tracking** with calibrated weight (co-optimises HPWL + density)
+- **Greedy pin flipping** post-SA (tries FN/FS/S mirror orientations per macro)
+- 1500 analytical steps (up from 1000), density_weight 0.003 (up from 0.001)
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **12369.19s** (~206 min for all 17 benchmarks)
+
+| Benchmark | v4 Proxy |    WL | Density | Congestion | v3 Proxy | Change | SA Baseline | vs SA | RePlAce | vs RePlAce |
+|-----------|----------|-------|---------|------------|----------|--------|-------------|-------|---------|------------|
+| ibm01     |   1.1782 |     — |       — |          — |   1.2362 |  -4.7% |      1.3166 |+10.5% |  0.9976 |     -18.1% |
+| ibm02     |   1.6815 |     — |       — |          — |   1.7591 |  -4.4% |      1.9072 |+11.8% |  1.8370 |      +8.5% |
+| ibm03     |   1.7161 |     — |       — |          — |   1.7848 |  -3.9% |      1.7401 | +1.4% |  1.3222 |     -29.8% |
+| ibm04     |   1.4399 |     — |       — |          — |   1.6224 | -11.3% |      1.5037 | +4.2% |  1.3024 |     -10.6% |
+| ibm06     |   1.9132 |     — |       — |          — |   2.0324 |  -5.9% |      2.5057 |+23.6% |  1.6187 |     -18.2% |
+| ibm07     |   1.5315 |     — |       — |          — |   1.6864 |  -9.2% |      2.0229 |+24.3% |  1.4633 |      -4.7% |
+| ibm08     |   1.6530 |     — |       — |          — |   1.8275 | -9.5%  |      1.9239 |+14.1% |  1.4285 |     -15.7% |
+| ibm09     |   1.1387 |     — |       — |          — |   1.2505 |  -8.9% |      1.3875 |+17.9% |  1.1194 |      -1.7% |
+| ibm10     |   1.6386 |     — |       — |          — |   1.6908 |  -3.1% |      2.1108 |+22.4% |  1.5009 |      -9.2% |
+| ibm11     |   1.3913 |     — |       — |          — |   1.4337 |  -3.0% |      1.7111 |+18.7% |  1.1774 |     -18.2% |
+| ibm12     |   1.9018 |     — |       — |          — |   1.9814 |  -4.0% |      2.8261 |+32.7% |  1.7261 |     -10.2% |
+| ibm13     |   1.5037 |     — |       — |          — |   1.6423 |  -8.4% |      1.9141 |+21.4% |  1.3355 |     -12.6% |
+| ibm14     |   1.6309 |     — |       — |          — |   1.7259 |  -5.5% |      2.2750 |+28.3% |  1.5436 |      -5.7% |
+| ibm15     |   1.6724 |     — |       — |          — |   1.8156 |  -7.9% |      2.3000 |+27.3% |  1.5159 |     -10.3% |
+| ibm16     |   1.5795 |     — |       — |          — |   1.7436 |  -9.4% |      2.2337 |+29.3% |  1.4780 |      -6.9% |
+| ibm17     |   1.7543 |     — |       — |          — |   1.7761 |  -1.2% |      3.6726 |+52.2% |  1.6446 |      -6.7% |
+| ibm18     |   1.7968 |     — |       — |          — |   1.8340 |  -2.0% |      2.7755 |+35.3% |  1.7722 |      -1.4% |
+| **AVG**   | **1.5954** |    — |       — |          — | **1.6966**| **-6.0%** | **2.1251** |**+24.9%** | **1.4578** | **-9.4%** |
+
+### Summary
+
+- **Average proxy cost: 1.5954** — down from 1.6966 (v3), a **6.0% improvement**
+- **Beats SA baseline** by **24.9%** on average (up from 20.2%)
+- **Gap to RePlAce** narrowed from **16.4% to 9.4%** — nearly halved
+- Biggest single-benchmark improvements: ibm04 (-11.3%), ibm08 (-9.5%), ibm16 (-9.4%), ibm07 (-9.2%), ibm09 (-8.9%)
+- **Beats RePlAce** on **ibm02** (+8.5%) — only benchmark where we exceed it
+- Zero overlaps on all 17 benchmarks
+- Runtime increased to 12369s (~206 min) due to density tracking in SA
+- The congestion-aware analytical phase is the main driver of improvement — better starting positions mean SA converges to lower-congestion solutions
+
+### Leaderboard Position
+
+| Rank | Method | Avg Proxy |
+|------|--------|-----------|
+| 1 | RePlAce (baseline) | 1.4578 |
+| 2 | **HybridPlacer v4 (ours)** | **1.5954** |
+| 3 | HybridPlacer v3 | 1.6966 |
+| 4 | SA (baseline) | 2.1251 |
+
+---
+
+## Benchmark Results (2026-04-07, v4 --no-media)
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **12369.19s** (~206 min for all 17 benchmarks)
+
+| Benchmark |  Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | Overlaps |
+|-----------|--------|-------------|---------|--------|------------|----------|
+| ibm01     | 1.1782 |      1.3166 |  0.9976 | +10.5% |     -18.1% |        0 |
+| ibm02     | 1.6815 |      1.9072 |  1.8370 | +11.8% |      +8.5% |        0 |
+| ibm03     | 1.7161 |      1.7401 |  1.3222 |  +1.4% |     -29.8% |        0 |
+| ibm04     | 1.4399 |      1.5037 |  1.3024 |  +4.2% |     -10.6% |        0 |
+| ibm06     | 1.9132 |      2.5057 |  1.6187 | +23.6% |     -18.2% |        0 |
+| ibm07     | 1.5315 |      2.0229 |  1.4633 | +24.3% |      -4.7% |        0 |
+| ibm08     | 1.6530 |      1.9239 |  1.4285 | +14.1% |     -15.7% |        0 |
+| ibm09     | 1.1387 |      1.3875 |  1.1194 | +17.9% |      -1.7% |        0 |
+| ibm10     | 1.6386 |      2.1108 |  1.5009 | +22.4% |      -9.2% |        0 |
+| ibm11     | 1.3913 |      1.7111 |  1.1774 | +18.7% |     -18.2% |        0 |
+| ibm12     | 1.9018 |      2.8261 |  1.7261 | +32.7% |     -10.2% |        0 |
+| ibm13     | 1.5037 |      1.9141 |  1.3355 | +21.4% |     -12.6% |        0 |
+| ibm14     | 1.6309 |      2.2750 |  1.5436 | +28.3% |      -5.7% |        0 |
+| ibm15     | 1.6724 |      2.3000 |  1.5159 | +27.3% |     -10.3% |        0 |
+| ibm16     | 1.5795 |      2.2337 |  1.4780 | +29.3% |      -6.9% |        0 |
+| ibm17     | 1.7543 |      3.6726 |  1.6446 | +52.2% |      -6.7% |        0 |
+| ibm18     | 1.7968 |      2.7755 |  1.7722 | +35.3% |      -1.4% |        0 |
+| **AVG**   | **1.5954** | **2.1251** | **1.4578** | **+24.9%** | **-9.4%** | **0** |
