@@ -1146,17 +1146,17 @@ class SAV2Placer(BasePlacer):
         t_start_factor: float = 0.12,
         t_end_factor: float = 0.0008,
         num_starts: int = 1,
-        reheat_threshold: int = 5_000,
+        reheat_threshold: int = 8_000,
         reheat_factor: float = 3.0,
         per_benchmark_overrides=None,
         analytical_warmstart: bool = False,
         density_weight_boost: float = 1.0,
         select_best_by_proxy: bool = True,
-        lahc_length: int = 200,
-        greedy_tail_frac: float = 0.05,
-        greedy_local_passes: int = 3,
-        adaptive_moves: bool = True,
-        gpu_refine_steps: int = 120,
+        lahc_length: int = 0,
+        greedy_tail_frac: float = 0.0,
+        greedy_local_passes: int = 0,
+        adaptive_moves: bool = False,
+        gpu_refine_steps: int = 0,
     ):
         self.seed = seed
         self.max_iters = max_iters
