@@ -17,13 +17,13 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 3 | "Convex Optimization" (UWaterloo Student) | 1.4556 | — | — | 0 | 16s total |  |
 | 4 | "another Waterloo kid" (Batched Nesterov GP) | 1.4568 | — | — | 0 | 118s/bench |  |
 | — | RePlAce (baseline) | 1.4578 | 0.9976 | 1.8370 | 0 | — | ✅ |
-| 5 | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
-| 6 | "oracleX" (Oracle) | 1.5130 | — | — | 0 | 3min/bench |  |
-| 7 | "CA" (congestion_aware) | 1.5238 | — | — | 0 | 13s/bench |  |
-| 8 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
-| 9 | **Learning Placer (ours)** | **1.5587** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
-| 10 | **SA V2 (Eklund, ours)** | **1.5738** | **1.2071** | **1.8011** | **0** | **668.95s total** |  |
-| 11 | **HybridPlacer v5 (ours)** | **1.5723** | **1.1204** | **1.8583** | **0** | **24641.71s total** |  |
+| 5 | **Learning Placer (ours)** | **1.4828** | **1.1035** | **1.7871** | **0** | **801.32s total** |  |
+| 6 | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
+| 7 | "oracleX" (Oracle) | 1.5130 | — | — | 0 | 3min/bench |  |
+| 8 | "CA" (congestion_aware) | 1.5238 | — | — | 0 | 13s/bench |  |
+| 9 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
+| 10 | **HybridPlacer v5 (ours)** | **1.5723** | **1.1204** | **1.8583** | **0** | **24641.71s total** |  |
+| 11 | **SA V2 (Eklund, ours)** | **1.5738** | **1.2071** | **1.8011** | **0** | **668.95s total** |  |
 | 12 | "UT Austin" - RH (DREAMPlace) | 1.6037 | — | — | 0 | 4.5s/bench |  |
 | 13 | **Analytical Placer (ours)** | **1.7394** | **1.3438** | **2.0684** | **0** | **598.68s total** |  |
 | 14 | "UT Austin" - CT (PROXYCost) | 1.8706 | — | — | 0 | 187s/bench |  |
@@ -40,7 +40,7 @@ Benchmark-history tracking for the note sections lives in:
 
 ![Benchmark history summary](notes/benchmark%20history/benchmark_history_full_suite.png)
 
-Latest update includes the new HybridPlacer v5 `H5` run (1.5723) from `2026-04-07` and SA V2 `V2` from `2026-04-07`.
+Latest update includes the new Learning Placer `L6` / v6 run (1.4828) from `2026-04-07`, plus HybridPlacer v5 `H5` (1.5723) and SA V2 `V2` (1.5738).
 
 ## About Macro Placement
 

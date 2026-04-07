@@ -235,3 +235,34 @@ Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC,
 Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
 **Result:** Quality is essentially tied with the previous SA V2 full-suite run (1.5697 -> 1.5738, +0.3%), but runtime improved dramatically (3478.35s -> 668.95s, about 5.2x faster).
 This keeps SA V2 clearly ahead of the SA baseline while making it much more practical under the competition runtime limit.
+
+## 2026-04-07 â€” v6: fast full-suite rerun (`--no-media`)
+
+Method: Learning Placer v6 via `submissions/placer.py --all --no-media`
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.1167 | - | - | - | - | BETTER (1.3166) |
+| ibm02 | 1.5970 | - | - | - | - | BETTER (1.9072) |
+| ibm03 | 1.3886 | - | - | - | - | BETTER (1.7401) |
+| ibm04 | 1.3923 | - | - | - | - | BETTER (1.5037) |
+| ibm06 | 1.6923 | - | - | - | - | BETTER (2.5057) |
+| ibm07 | 1.4864 | - | - | - | - | BETTER (2.0229) |
+| ibm08 | 1.5223 | - | - | - | - | BETTER (1.9239) |
+| ibm09 | 1.1035 | - | - | - | - | BETTER (1.3875) |
+| ibm10 | 1.3697 | - | - | - | - | BETTER (2.1108) |
+| ibm11 | 1.2315 | - | - | - | - | BETTER (1.7111) |
+| ibm12 | 1.6441 | - | - | - | - | BETTER (2.8261) |
+| ibm13 | 1.3902 | - | - | - | - | BETTER (1.9141) |
+| ibm14 | 1.6145 | - | - | - | - | BETTER (2.2750) |
+| ibm15 | 1.5939 | - | - | - | - | BETTER (2.3000) |
+| ibm16 | 1.5277 | - | - | - | - | BETTER (2.2337) |
+| ibm17 | 1.7493 | - | - | - | - | BETTER (3.6726) |
+| ibm18 | 1.7871 | - | - | - | - | BETTER (2.7755) |
+| **AVG** | **1.4828** | | | | 801.32s | **SA: 2.1251** |
+
+Beat SA baseline on 17/17. Beat RePlAce on 11/17.
+**Major improvement: 1.5587 -> 1.4828 (-4.9%).**
+This L6/V6 run is the strongest logged Learning Placer result so far and now edges past our SA Placer baseline average (1.4850).
+Per-benchmark WL/density/congestion breakdown was not captured in the pasted summary, so only proxy and total runtime are logged for this run.

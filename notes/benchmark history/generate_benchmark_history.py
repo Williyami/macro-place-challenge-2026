@@ -52,6 +52,13 @@ def _safe_float(s: str) -> float | None:
         return None
 
 
+def split_heading_date_title(heading: str) -> tuple[str, str]:
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})\s*(?:â€”|—|-)\s*(.+)$", heading)
+    if match:
+        return match.group(1), match.group(2).strip()
+    return "", heading
+
+
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
     text = path.read_text(encoding="utf-8")
@@ -72,10 +79,7 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
         heading = block.splitlines()[0][3:].strip()
         if "sa_v2" in heading.lower() or "sa v2" in heading.lower():
             continue
-        if "—" in heading:
-            date, title = [part.strip() for part in heading.split("—", 1)]
-        else:
-            date, title = "", heading
+        date, title = split_heading_date_title(heading)
 
         method = "Learning Placer"
         benchmarks: list[BenchmarkRow] = []
@@ -513,10 +517,7 @@ def parse_sa_v2() -> tuple[list[RunRecord], list[dict[str, object]]]:
         if "sa_v2" not in heading.lower() and "sa v2" not in heading.lower():
             continue
 
-        if "—" in heading:
-            date, title = [part.strip() for part in heading.split("—", 1)]
-        else:
-            date, title = "", heading
+        date, title = split_heading_date_title(heading)
 
         method = "SA V2 (Eklund)"
         benchmarks: list[BenchmarkRow] = []
@@ -622,3 +623,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
