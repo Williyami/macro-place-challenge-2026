@@ -54,7 +54,7 @@ def _safe_float(s: str) -> float | None:
 
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
 
     runs: list[RunRecord] = []
@@ -163,7 +163,7 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
 
 def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(Hybrid method)novaknotes.md"
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
     sections = re.split(r"(?=^## Benchmark Results \()", text, flags=re.M)
@@ -258,7 +258,7 @@ def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
 
 def parse_sa_analytical() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(SA + Analytical method) Omnellnotes.md"
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
     sections = re.split(r"(?=^## Benchmark Results \()", text, flags=re.M)
@@ -498,7 +498,7 @@ def parse_sa_v2() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
     if not path.exists():
         return [], []
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
 
     runs: list[RunRecord] = []

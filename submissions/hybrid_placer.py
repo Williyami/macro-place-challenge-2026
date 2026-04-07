@@ -1,22 +1,23 @@
 """
-Hybrid Placer v5 — Multi-candidate analytical → Density-tracking SA → Greedy flip.
+Hybrid Placer v6 — Multi-candidate analytical → SA → GPU refine → Greedy refine.
 
-Improvements over v4 (avg 1.5954):
-  - Quadratic placement init from net connectivity (weighted Laplacian solve)
-  - Gamma annealing (40→3): global exploration → local refinement
-  - Cosine LR schedule for better convergence
-  - Electrostatic repulsion for global macro spreading
-  - Overlap weight annealing (0.01→18): gentle early, strong late
-  - Multi-candidate analytical (3 configs with different density/halo/repulsion)
-  - Gradient clipping for stability
-  - 2000 analytical steps (up from 1500)
+Improvements over v5 (avg 1.5723):
+  - 5 analytical candidates (up from 3) with wider diversity including
+    congestion-heavy and wirelength-focused configs
+  - GPU post-refinement with congestion loss (200 Adam steps)
+  - Evaluator-guided greedy coordinate descent: tries small perturbations
+    per macro and accepts if actual proxy cost (WL+density+congestion) improves
+  - Soft macro recentering at connected-pin centroids
 
 Strategy:
-  1. Analytical phase: 3 candidates × 2000 Adam steps with gamma annealing,
+  1. Analytical phase: 5 candidates × 2000 Adam steps with gamma annealing,
      quadratic init, cosine LR, HPWL + density + congestion + repulsion + overlap.
   2. Legalization: Minimum-displacement snap to resolve overlaps.
   3. SA phase: HPWL + density co-optimization with reheating (300K iters).
   4. Greedy flip: Try mirror orientations for each macro to reduce HPWL.
+  5. GPU refine: Short differentiable pass with congestion-aware loss.
+  6. Greedy refine: Evaluator-in-the-loop coordinate descent (3 passes).
+  7. Soft recenter: Move soft macros to weighted pin centroids.
 
 Usage:
     uv run evaluate submissions/hybrid_placer.py
@@ -555,6 +556,7 @@ def _gpu_post_refine(
     lr: float = 0.08,
     gamma: float = 4.0,
     density_weight: float = 0.002,
+    congestion_weight: float = 0.001,
     overlap_weight: float = 0.08,
     anchor_weight: float = 0.01,
     seed: int = 42,
@@ -563,7 +565,8 @@ def _gpu_post_refine(
     Short GPU refinement pass after SA.
 
     Keeps the SA solution as an anchor while letting differentiable losses
-    recover a bit of wirelength/density quality on the final placement.
+    (HPWL + density + congestion + overlap) fine-tune positions.
+    The congestion term helps reduce routing hotspots that SA misses.
     """
     torch.manual_seed(seed)
     device = _hybrid_device()
@@ -601,11 +604,21 @@ def _gpu_post_refine(
 
         hpwl = _lse_hpwl(pos, net_mask, net_hard, net_is_hard, net_ox, net_oy, net_weight, gamma=gamma)
         density = _density_penalty(pos, sizes, cw, ch) * density_weight
+        congestion = _congestion_penalty(
+            pos, net_mask, net_hard, net_is_hard, net_ox, net_oy,
+            net_weight, cw, ch,
+        ) * congestion_weight
         overlap = _overlap_penalty(pos, sizes) * overlap_weight
         anchor = ((pos[movable] - base_pos[movable]) ** 2).sum() * anchor_weight
 
-        loss = hpwl + density + overlap + anchor
+        loss = hpwl + density + congestion + overlap + anchor
         loss.backward()
+
+        # Clip grads for stability
+        if pos.grad is not None:
+            pos.grad[fixed_mask] = 0.0
+            torch.nn.utils.clip_grad_norm_([pos], max_norm=max(cw, ch))
+
         optimizer.step()
 
         with torch.no_grad():
@@ -1130,17 +1143,162 @@ def _sa_refine_congestion(
     return best_pos
 
 
+# ── Evaluator-guided greedy refinement ─────────────────────────────────────
+
+def _greedy_refine_proxy(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    max_passes: int = 3,
+    scales: tuple = (0.01, 0.03, 0.06),
+):
+    """
+    Greedy coordinate descent using the actual proxy evaluator.
+
+    For each movable macro, tries small perturbations in 8 directions at
+    multiple scales.  Accepts the position that gives the lowest *real*
+    proxy cost (WL + 0.5*density + 0.5*congestion).
+
+    This directly optimises the target metric, closing the gap that SA
+    (which only tracks HPWL + density) leaves on the table — especially
+    for congestion.
+    """
+    GAP = 0.05
+    n_hard = len(movable)
+    best_pos = pos.copy()
+    best_score = _proxy_score_pos(benchmark, plc, best_pos)
+
+    directions = [
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    ]
+
+    for pass_num in range(max_passes):
+        improved = False
+        macro_order = np.where(movable)[0].copy()
+        np.random.shuffle(macro_order)
+
+        for i in macro_order:
+            old_x, old_y = best_pos[i, 0], best_pos[i, 1]
+            best_local_score = best_score
+            best_local_x, best_local_y = old_x, old_y
+
+            for scale in scales:
+                dx = cw * scale
+                dy = ch * scale
+                for ax, ay in directions:
+                    new_x = float(np.clip(old_x + ax * dx, half_w[i], cw - half_w[i]))
+                    new_y = float(np.clip(old_y + ay * dy, half_h[i], ch - half_h[i]))
+
+                    if new_x == old_x and new_y == old_y:
+                        continue
+
+                    # Quick overlap check
+                    best_pos[i, 0] = new_x
+                    best_pos[i, 1] = new_y
+                    ddx = np.abs(best_pos[i, 0] - best_pos[:, 0])
+                    ddy = np.abs(best_pos[i, 1] - best_pos[:, 1])
+                    ov = (ddx < sep_x[i] + GAP) & (ddy < sep_y[i] + GAP)
+                    ov[i] = False
+                    if ov.any():
+                        best_pos[i, 0] = old_x
+                        best_pos[i, 1] = old_y
+                        continue
+
+                    score = _proxy_score_pos(benchmark, plc, best_pos)
+                    if score < best_local_score:
+                        best_local_score = score
+                        best_local_x, best_local_y = new_x, new_y
+
+                    best_pos[i, 0] = old_x
+                    best_pos[i, 1] = old_y
+
+            if best_local_score < best_score - 1e-6:
+                best_pos[i, 0] = best_local_x
+                best_pos[i, 1] = best_local_y
+                best_score = best_local_score
+                improved = True
+
+        if not improved:
+            break
+
+    return best_pos
+
+
+# ── Fast soft macro recentering ────────────────────────────────────────────
+
+def _recenter_soft_macros(pos_hard: np.ndarray, benchmark, plc):
+    """
+    Place each soft macro at the weighted centroid of its connected pin positions.
+
+    After hard macros are placed, soft macro positions affect wirelength and
+    congestion.  Moving them to the centroid of their net partners is a cheap
+    improvement over the initial.plc positions.
+    """
+    n_hard = benchmark.num_hard_macros
+    cw = float(benchmark.canvas_width)
+    ch = float(benchmark.canvas_height)
+
+    # Build soft macro -> connected pin positions
+    soft_positions = []
+    for si, plc_idx in enumerate(benchmark.soft_macro_indices):
+        mod = plc.modules_w_pins[plc_idx]
+        name = mod.get_name()
+        sw = mod.get_width()
+        sh = mod.get_height()
+
+        # Collect positions of all pins connected to this soft macro
+        cx_sum, cy_sum, w_sum = 0.0, 0.0, 0.0
+        pin_map = getattr(plc, '_macro_pin_map', {})
+        for pin_idx in pin_map.get(name, []):
+            pin = plc.modules_w_pins[pin_idx]
+            if not pin.get_sink():
+                continue
+            for sink_list in pin.get_sink().values():
+                for sink_name in sink_list:
+                    if sink_name not in plc.mod_name_to_indices:
+                        continue
+                    sink_idx = plc.mod_name_to_indices[sink_name]
+                    sink_obj = plc.modules_w_pins[sink_idx]
+                    sx, sy = sink_obj.get_pos()
+                    w = pin.get_weight() if pin.get_weight() > 0 else 1.0
+                    cx_sum += sx * w
+                    cy_sum += sy * w
+                    w_sum += w
+
+        if w_sum > 0:
+            cx = np.clip(cx_sum / w_sum, sw / 2, cw - sw / 2)
+            cy = np.clip(cy_sum / w_sum, sh / 2, ch - sh / 2)
+            soft_positions.append((cx, cy))
+        else:
+            soft_positions.append(mod.get_pos())
+
+    return np.array(soft_positions, dtype=np.float64) if soft_positions else np.empty((0, 2))
+
+
 # ── HybridPlacer class ─────────────────────────────────────────────────────
 
 class HybridPlacer(BasePlacer):
     """
-    Hybrid placer v5: multi-candidate analytical → density-tracking SA → greedy flip.
+    Hybrid placer v6: multi-candidate analytical → SA → GPU refine → greedy → flip.
 
-    Phase 1 (analytical): 2000 Adam steps × N candidates with gamma annealing,
-      cosine LR, quadratic init, congestion + density + repulsion + overlap.
+    Phase 1 (analytical): 2000 Adam steps × 5 diverse candidates with gamma
+      annealing, cosine LR, quadratic init, congestion + density + repulsion.
     Phase 2 (legalize): Minimum-displacement overlap resolution.
     Phase 3 (SA): 300K iterations with HPWL + density co-optimization + reheating.
     Phase 4 (flip): Greedy pin orientation flipping for HPWL reduction.
+    Phase 5 (GPU refine): Short differentiable pass with congestion loss.
+    Phase 6 (greedy refine): Evaluator-guided coordinate descent — tries small
+      perturbations per macro, accepts if actual proxy cost improves.
+    Phase 7 (soft recenter): Recenters soft macros at connected-pin centroids.
     """
 
     def __init__(
@@ -1148,7 +1306,7 @@ class HybridPlacer(BasePlacer):
         seed: int = 42,
         # Analytical phase
         analytical_steps: int = 2000,
-        analytical_candidates: int = 3,
+        analytical_candidates: int = 5,
         # SA phase
         sa_iters: int = 300_000,
         sa_t_start: float = 0.15,
@@ -1156,7 +1314,9 @@ class HybridPlacer(BasePlacer):
         reheat_threshold: int = 10_000,
         reheat_factor: float = 3.0,
         sa_density_boost: float = 1.0,
-        post_refine_steps: int = 0,
+        post_refine_steps: int = 200,
+        # Greedy refinement
+        greedy_passes: int = 3,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
@@ -1174,6 +1334,7 @@ class HybridPlacer(BasePlacer):
         self.reheat_factor = reheat_factor
         self.sa_density_boost = sa_density_boost
         self.post_refine_steps = post_refine_steps
+        self.greedy_passes = greedy_passes
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
@@ -1212,12 +1373,21 @@ class HybridPlacer(BasePlacer):
         if plc is not None:
             # Different density/halo/repulsion configs explore diverse strategies
             candidate_configs = [
+                # Balanced (original best)
                 dict(density_weight=0.006, congestion_weight=0.001,
                      repulsion_weight=0.6, halo_area=0.12, halo_base=0.04),
+                # High density + congestion pressure (spread macros aggressively)
                 dict(density_weight=0.012, congestion_weight=0.002,
                      repulsion_weight=1.0, halo_area=0.16, halo_base=0.05),
+                # Low pressure (trust HPWL, minimal spreading)
                 dict(density_weight=0.004, congestion_weight=0.0008,
                      repulsion_weight=0.3, halo_area=0.08, halo_base=0.03),
+                # Congestion-heavy (push hard on routing demand reduction)
+                dict(density_weight=0.008, congestion_weight=0.005,
+                     repulsion_weight=0.8, halo_area=0.20, halo_base=0.06),
+                # Wirelength-focused (minimal penalties, tight packing)
+                dict(density_weight=0.002, congestion_weight=0.0004,
+                     repulsion_weight=0.15, halo_area=0.05, halo_base=0.02),
             ][:max(1, self.analytical_candidates)]
 
             best_init_score = float("inf")
@@ -1317,6 +1487,7 @@ class HybridPlacer(BasePlacer):
         if nets and plc is not None:
             _greedy_flip(pos, nets, macro_to_nets, movable, plc)
 
+        # ── GPU post-refinement (congestion-aware differentiable fine-tune) ─
         if plc is not None and self.post_refine_steps > 0:
             sa_pos = pos.copy()
             refined_pos = _gpu_post_refine(
@@ -1335,9 +1506,35 @@ class HybridPlacer(BasePlacer):
             except Exception:
                 pos = sa_pos
 
+        # ── Evaluator-guided greedy refinement ─────────────────────────────
+        if plc is not None and self.greedy_passes > 0:
+            pos = _greedy_refine_proxy(
+                pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                max_passes=self.greedy_passes,
+            )
+
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
         full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+
+        # ── Fast soft macro recentering ────────────────────────────────────
+        if plc is not None and benchmark.num_soft_macros > 0:
+            # First update plc with final hard macro positions for pin lookups
+            from macro_place.objective import _set_placement
+            _set_placement(plc, full_pos, benchmark)
+            soft_new = _recenter_soft_macros(pos, benchmark, plc)
+            if len(soft_new) > 0:
+                # Score with recentered soft macros vs original
+                full_recentered = full_pos.clone()
+                full_recentered[n_hard:] = torch.tensor(soft_new, dtype=torch.float32)
+                try:
+                    score_orig = float(compute_proxy_cost(full_pos, benchmark, plc)["proxy_cost"])
+                    score_new = float(compute_proxy_cost(full_recentered, benchmark, plc)["proxy_cost"])
+                    if score_new < score_orig:
+                        full_pos = full_recentered
+                except Exception:
+                    pass
 
         if self.run_fd and plc is not None and benchmark.num_soft_macros > 0:
             soft_pos = _update_soft_macros(pos, benchmark, plc)
