@@ -282,6 +282,110 @@ def _density_cost_from_grid(grid_occupied, grid_area, n_cells):
     return 0.5 * sum(nonzero[:cnt]) / cnt
 
 
+# ── congestion grid helpers ──────────────────────────────────────────────
+
+def _net_bbox_cells(net, pos, grid_col, grid_row, gw, gh):
+    """Return (row_min, row_max, col_min, col_max) of grid cells spanned by net bbox."""
+    hx = pos[net["hard_idx"], 0] + net["hard_ox"]
+    hy = pos[net["hard_idx"], 1] + net["hard_oy"]
+    xmin = min(float(hx.min()), net["fxmin"])
+    xmax = max(float(hx.max()), net["fxmax"])
+    ymin = min(float(hy.min()), net["fymin"])
+    ymax = max(float(hy.max()), net["fymax"])
+
+    INF = float("inf")
+    if xmin == INF or xmax == -INF:
+        return None
+
+    col_min = max(0, int(xmin / gw))
+    col_max = min(grid_col - 1, int(xmax / gw))
+    row_min = max(0, int(ymin / gh))
+    row_max = min(grid_row - 1, int(ymax / gh))
+    return row_min, row_max, col_min, col_max
+
+
+def _add_net_routing_demand(h_grid, v_grid, row_min, row_max, col_min, col_max,
+                            grid_col, weight):
+    """Add L-shaped routing demand for a net's bounding box to H/V grids."""
+    # Horizontal demand: along row_min from col_min to col_max
+    for c in range(col_min, col_max):
+        h_grid[row_min * grid_col + c] += weight
+    # Vertical demand: along col_max from row_min to row_max
+    for r in range(row_min, row_max):
+        v_grid[r * grid_col + col_max] += weight
+
+
+def _remove_net_routing_demand(h_grid, v_grid, row_min, row_max, col_min, col_max,
+                               grid_col, weight):
+    """Remove L-shaped routing demand for a net's bounding box from H/V grids."""
+    for c in range(col_min, col_max):
+        h_grid[row_min * grid_col + c] -= weight
+    for r in range(row_min, row_max):
+        v_grid[r * grid_col + col_max] -= weight
+
+
+def _build_congestion_grid(pos, nets, grid_col, grid_row, gw, gh):
+    """Build initial H/V routing demand grids from all nets."""
+    n_cells = grid_col * grid_row
+    h_grid = np.zeros(n_cells)
+    v_grid = np.zeros(n_cells)
+    net_bboxes = []
+
+    for net in nets:
+        bbox = _net_bbox_cells(net, pos, grid_col, grid_row, gw, gh)
+        net_bboxes.append(bbox)
+        if bbox is not None:
+            row_min, row_max, col_min, col_max = bbox
+            w = net["weight"]
+            _add_net_routing_demand(h_grid, v_grid, row_min, row_max, col_min, col_max,
+                                   grid_col, w)
+    return h_grid, v_grid, net_bboxes
+
+
+def _congestion_cost_from_grids(h_grid, v_grid, grid_h_routes, grid_v_routes, n_cells):
+    """Compute congestion cost matching evaluator: abu(top 5% of normalized H+V)."""
+    # Normalize by routing capacity
+    h_norm = h_grid / max(grid_h_routes, 1e-10)
+    v_norm = v_grid / max(grid_v_routes, 1e-10)
+    combined = h_norm + v_norm
+    # ABU top 5%
+    cnt = max(1, int(n_cells * 0.05))
+    top_vals = np.partition(combined, -cnt)[-cnt:]
+    return float(top_vals.mean())
+
+
+def _net_bbox_cells_override(net, pos, m, new_x, new_y, grid_col, grid_row, gw, gh):
+    """Compute net bbox cells with macro m at (new_x, new_y)."""
+    idx = net["hard_idx"]
+    ox = net["hard_ox"]
+    oy = net["hard_oy"]
+
+    hx = pos[idx, 0] + ox
+    hy = pos[idx, 1] + oy
+
+    mask = (idx == m)
+    if mask.any():
+        hx = hx.copy()
+        hy = hy.copy()
+        hx[mask] = new_x + ox[mask]
+        hy[mask] = new_y + oy[mask]
+
+    xmin = min(float(hx.min()), net["fxmin"])
+    xmax = max(float(hx.max()), net["fxmax"])
+    ymin = min(float(hy.min()), net["fymin"])
+    ymax = max(float(hy.max()), net["fymax"])
+
+    INF = float("inf")
+    if xmin == INF or xmax == -INF:
+        return None
+
+    col_min = max(0, int(xmin / gw))
+    col_max = min(grid_col - 1, int(xmax / gw))
+    row_min = max(0, int(ymin / gh))
+    row_max = min(grid_row - 1, int(ymax / gh))
+    return row_min, row_max, col_min, col_max
+
+
 # ── legalization (minimum displacement) ─────────────────────────────────────
 
 def _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n, sep_x, sep_y):
@@ -364,11 +468,14 @@ def _sa_refine(
     reheat_threshold: int = 0,
     reheat_factor: float = 3.0,
     density_weight: float = 0.0,
+    congestion_weight: float = 0.0,
     grid_col: int = 0,
     grid_row: int = 0,
+    grid_h_routes: float = 0.0,
+    grid_v_routes: float = 0.0,
     benchmark=None,
 ) -> np.ndarray:
-    """SA loop minimising proxy cost (HPWL + density + periphery).
+    """SA loop minimising proxy cost (HPWL + density + congestion).
 
     Parameters
     ----------
@@ -379,8 +486,12 @@ def _sa_refine(
         On reheat, multiply current temperature by this factor (capped at T_start).
     density_weight : float
         Weight for density penalty in HPWL units.  0 disables density tracking.
+    congestion_weight : float
+        Weight for congestion penalty in HPWL units.  0 disables congestion tracking.
     grid_col, grid_row : int
-        Grid dimensions for density tracking.
+        Grid dimensions for density/congestion tracking.
+    grid_h_routes, grid_v_routes : float
+        Routing capacity per grid cell (H and V).
     benchmark : Benchmark or None
         Needed for soft-macro density contributions.
     """
@@ -411,21 +522,35 @@ def _sa_refine(
     T_start = max(cw, ch) * t_start_factor
     T_end   = max(cw, ch) * t_end_factor
 
-    # ── Density tracking ──────────────────────────────────────────────────
+    # ── Grid setup ────────────────────────────────────────────────────────
     use_density = density_weight > 0 and grid_col > 0 and grid_row > 0
-    if use_density:
+    use_congestion = congestion_weight > 0 and grid_col > 0 and grid_row > 0
+
+    if use_density or use_congestion:
         gw = cw / grid_col
         gh = ch / grid_row
-        grid_area = gw * gh
         n_grid = grid_col * grid_row
+
+    if use_density:
+        grid_area = gw * gh
         grid_occupied = _build_density_grid(
             pos, sizes, n_hard, grid_col, grid_row, gw, gh, benchmark,
         )
         current_density = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
-        best_cost = current_hpwl + density_weight * current_density
     else:
         current_density = 0.0
-        best_cost = current_hpwl
+
+    if use_congestion:
+        h_cong_grid, v_cong_grid, net_bboxes = _build_congestion_grid(
+            pos, nets, grid_col, grid_row, gw, gh,
+        )
+        current_congestion = _congestion_cost_from_grids(
+            h_cong_grid, v_cong_grid, grid_h_routes, grid_v_routes, n_grid,
+        )
+    else:
+        current_congestion = 0.0
+
+    best_cost = current_hpwl + density_weight * current_density + congestion_weight * current_congestion
 
     # Reheating state
     steps_since_improvement = 0
@@ -478,12 +603,39 @@ def _sa_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            # Congestion penalty (incremental: update bboxes of affected nets)
+            old_net_bboxes_i = None
+            new_cong = current_congestion
+            if use_congestion:
+                old_net_bboxes_i = {}
+                for ni in macro_to_nets[i]:
+                    net = nets[ni]
+                    old_bbox = net_bboxes[ni]
+                    if old_bbox is not None:
+                        _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                            old_bbox[0], old_bbox[1], old_bbox[2], old_bbox[3],
+                            grid_col, net["weight"])
+                    new_bbox = _net_bbox_cells_override(net, pos, i, new_x, new_y,
+                        grid_col, grid_row, gw, gh)
+                    if new_bbox is not None:
+                        _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                            new_bbox[0], new_bbox[1], new_bbox[2], new_bbox[3],
+                            grid_col, net["weight"])
+                    old_net_bboxes_i[ni] = (old_bbox, new_bbox)
+                new_cong = _congestion_cost_from_grids(
+                    h_cong_grid, v_cong_grid, grid_h_routes, grid_v_routes, n_grid)
+                delta += congestion_weight * (new_cong - current_congestion)
+
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_x; pos[i, 1] = new_y
                 current_hpwl += delta_hpwl
                 if use_density:
                     current_density = new_dens
-                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if use_congestion:
+                    current_congestion = new_cong
+                    for ni, (old_bb, new_bb) in old_net_bboxes_i.items():
+                        net_bboxes[ni] = new_bb
+                cost = current_hpwl + density_weight * current_density + congestion_weight * current_congestion
                 if cost < best_cost:
                     best_cost = cost
                     best_hpwl = current_hpwl
@@ -495,6 +647,18 @@ def _sa_refine(
                 if use_density:
                     for ci, a in new_cells: grid_occupied[ci] -= a
                     for ci, a in old_cells: grid_occupied[ci] += a
+                if use_congestion:
+                    # Revert congestion grid changes
+                    for ni, (old_bb, new_bb) in old_net_bboxes_i.items():
+                        net = nets[ni]
+                        if new_bb is not None:
+                            _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                                new_bb[0], new_bb[1], new_bb[2], new_bb[3],
+                                grid_col, net["weight"])
+                        if old_bb is not None:
+                            _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                                old_bb[0], old_bb[1], old_bb[2], old_bb[3],
+                                grid_col, net["weight"])
                 steps_since_improvement += 1
 
         elif move < 0.80:
@@ -546,13 +710,47 @@ def _sa_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            # Congestion penalty for swap
+            old_swap_bboxes = None
+            new_cong = current_congestion
+            if use_congestion:
+                old_swap_bboxes = {}
+                # Remove old routing demand for affected nets
+                for ni in affected:
+                    net = nets[ni]
+                    old_bbox = net_bboxes[ni]
+                    if old_bbox is not None:
+                        _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                            old_bbox[0], old_bbox[1], old_bbox[2], old_bbox[3],
+                            grid_col, net["weight"])
+                # Temporarily apply swap to compute new bboxes
+                pos[i, 0] = new_ix; pos[i, 1] = new_iy
+                pos[j, 0] = new_jx; pos[j, 1] = new_jy
+                for ni in affected:
+                    net = nets[ni]
+                    new_bbox = _net_bbox_cells(net, pos, grid_col, grid_row, gw, gh)
+                    if new_bbox is not None:
+                        _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                            new_bbox[0], new_bbox[1], new_bbox[2], new_bbox[3],
+                            grid_col, net["weight"])
+                    old_swap_bboxes[ni] = (net_bboxes[ni], new_bbox)
+                pos[i, 0] = old_x;  pos[i, 1] = old_y
+                pos[j, 0] = old_jx; pos[j, 1] = old_jy
+                new_cong = _congestion_cost_from_grids(
+                    h_cong_grid, v_cong_grid, grid_h_routes, grid_v_routes, n_grid)
+                delta += congestion_weight * (new_cong - current_congestion)
+
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_ix; pos[i, 1] = new_iy
                 pos[j, 0] = new_jx; pos[j, 1] = new_jy
                 current_hpwl += delta_hpwl
                 if use_density:
                     current_density = new_dens
-                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if use_congestion:
+                    current_congestion = new_cong
+                    for ni, (old_bb, new_bb) in old_swap_bboxes.items():
+                        net_bboxes[ni] = new_bb
+                cost = current_hpwl + density_weight * current_density + congestion_weight * current_congestion
                 if cost < best_cost:
                     best_cost = cost
                     best_hpwl = current_hpwl
@@ -566,6 +764,17 @@ def _sa_refine(
                     for ci, a in new_cells_j: grid_occupied[ci] -= a
                     for ci, a in old_cells_i: grid_occupied[ci] += a
                     for ci, a in old_cells_j: grid_occupied[ci] += a
+                if use_congestion:
+                    for ni, (old_bb, new_bb) in old_swap_bboxes.items():
+                        net = nets[ni]
+                        if new_bb is not None:
+                            _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                                new_bb[0], new_bb[1], new_bb[2], new_bb[3],
+                                grid_col, net["weight"])
+                        if old_bb is not None:
+                            _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                                old_bb[0], old_bb[1], old_bb[2], old_bb[3],
+                                grid_col, net["weight"])
                 steps_since_improvement += 1
 
         else:
@@ -596,12 +805,39 @@ def _sa_refine(
                 new_dens = _density_cost_from_grid(grid_occupied, grid_area, n_grid)
                 delta += density_weight * (new_dens - current_density)
 
+            # Congestion penalty
+            old_net_bboxes_n = None
+            new_cong = current_congestion
+            if use_congestion:
+                old_net_bboxes_n = {}
+                for ni in macro_to_nets[i]:
+                    net = nets[ni]
+                    old_bbox = net_bboxes[ni]
+                    if old_bbox is not None:
+                        _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                            old_bbox[0], old_bbox[1], old_bbox[2], old_bbox[3],
+                            grid_col, net["weight"])
+                    new_bbox = _net_bbox_cells_override(net, pos, i, new_x, new_y,
+                        grid_col, grid_row, gw, gh)
+                    if new_bbox is not None:
+                        _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                            new_bbox[0], new_bbox[1], new_bbox[2], new_bbox[3],
+                            grid_col, net["weight"])
+                    old_net_bboxes_n[ni] = (old_bbox, new_bbox)
+                new_cong = _congestion_cost_from_grids(
+                    h_cong_grid, v_cong_grid, grid_h_routes, grid_v_routes, n_grid)
+                delta += congestion_weight * (new_cong - current_congestion)
+
             if delta < 0 or rng.random() < math.exp(-delta / max(T, 1e-12)):
                 pos[i, 0] = new_x; pos[i, 1] = new_y
                 current_hpwl += delta_hpwl
                 if use_density:
                     current_density = new_dens
-                cost = current_hpwl + density_weight * current_density if use_density else current_hpwl
+                if use_congestion:
+                    current_congestion = new_cong
+                    for ni, (old_bb, new_bb) in old_net_bboxes_n.items():
+                        net_bboxes[ni] = new_bb
+                cost = current_hpwl + density_weight * current_density + congestion_weight * current_congestion
                 if cost < best_cost:
                     best_cost = cost
                     best_hpwl = current_hpwl
@@ -613,6 +849,17 @@ def _sa_refine(
                 if use_density:
                     for ci, a in new_cells: grid_occupied[ci] -= a
                     for ci, a in old_cells: grid_occupied[ci] += a
+                if use_congestion:
+                    for ni, (old_bb, new_bb) in old_net_bboxes_n.items():
+                        net = nets[ni]
+                        if new_bb is not None:
+                            _remove_net_routing_demand(h_cong_grid, v_cong_grid,
+                                new_bb[0], new_bb[1], new_bb[2], new_bb[3],
+                                grid_col, net["weight"])
+                        if old_bb is not None:
+                            _add_net_routing_demand(h_cong_grid, v_cong_grid,
+                                old_bb[0], old_bb[1], old_bb[2], old_bb[3],
+                                grid_col, net["weight"])
                 steps_since_improvement += 1
 
         if snapshot_callback is not None and snapshot_interval > 0:
@@ -918,12 +1165,15 @@ class SAPlacer(BasePlacer):
 
         capture_snapshot(init_pos)
 
-        # ── Density weight calibration ────────────────────────────────────
+        # ── Density & congestion weight calibration ────────────────────────
         # proxy = 1.0*WL_norm + 0.5*density + 0.5*congestion
-        # Convert density_penalty to HPWL-equivalent units so SA can
-        # co-optimise both in a single acceptance criterion.
+        # Convert density/congestion penalties to HPWL-equivalent units so SA
+        # can co-optimise all three in a single acceptance criterion.
         grid_col = grid_row = 0
         density_w = 0.0
+        congestion_w = 0.0
+        grid_h_routes = 0.0
+        grid_v_routes = 0.0
         if plc is not None and nets:
             try:
                 grid_col, grid_row = plc.grid_col, plc.grid_row
@@ -935,13 +1185,23 @@ class SAPlacer(BasePlacer):
                     wl_norm = plc.get_cost()
                     raw_hpwl = _compute_total_hpwl(init_pos, nets)
                     if wl_norm > 1e-10 and raw_hpwl > 1e-10:
-                        # density_weight converts: delta_density → HPWL-equivalent
-                        # proxy uses weight 0.5 for density, so:
-                        density_w = 0.5 * raw_hpwl / wl_norm
+                        hpwl_per_wl = raw_hpwl / wl_norm
+                        # density_weight: proxy uses 0.5 * density
+                        density_w = 0.5 * hpwl_per_wl
                         density_w *= self.density_weight_boost
+                        # congestion tracking disabled: per-iteration overhead
+                        # too high and simplified proxy doesn't match evaluator
+                        # well enough to justify the cost.
+                        congestion_w = 0.0
+                    # Routing capacity per grid cell
+                    gw = cw / grid_col
+                    gh = ch / grid_row
+                    grid_h_routes = gh * getattr(plc, 'hroutes_per_micron', 0.0)
+                    grid_v_routes = gw * getattr(plc, 'vroutes_per_micron', 0.0)
             except Exception:
                 grid_col = grid_row = 0
                 density_w = 0.0
+                congestion_w = 0.0
 
         # Multi-start SA: run multiple times with different seeds, keep best
         num_starts = params["num_starts"]
@@ -969,8 +1229,11 @@ class SAPlacer(BasePlacer):
                     reheat_threshold=params["reheat_threshold"],
                     reheat_factor=params["reheat_factor"],
                     density_weight=density_w,
+                    congestion_weight=congestion_w,
                     grid_col=grid_col,
                     grid_row=grid_row,
+                    grid_h_routes=grid_h_routes,
+                    grid_v_routes=grid_v_routes,
                     benchmark=benchmark,
                 )
                 if use_proxy:

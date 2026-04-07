@@ -301,3 +301,48 @@ Changes from previous SA run:
 2. **Window-based moves** — restrict shift moves to local neighborhood (scales better for large benchmarks like ibm17)
 3. **Per-benchmark tuning** — add overrides for ibm17, ibm06, ibm18 (worst relative performers)
 4. **Improve analytical placer** — try as standalone competitor with heavy tuning (10K+ iters, better weights)
+
+## 2026-04-06 — SA S5: Congestion infrastructure + per-benchmark overrides (ibm06/17/18)
+
+### SA Placer (full_suite) — S5
+
+**Method:** SA with congestion grid infrastructure added (but disabled due to overhead), plus per-benchmark overrides for ibm06, ibm17, ibm18 (extra iterations + reheat).
+
+| Benchmark | Proxy  | WL    | Density | Congestion | Time    | vs S3     |
+|-----------|--------|-------|---------|------------|---------|-----------|
+| ibm01     | 1.1362 | 0.069 | 0.827   | 1.307      |  20.73s | =         |
+| ibm02     | 1.5992 | 0.076 | 0.728   | 2.319      |  12.61s | -0.002    |
+| ibm03     | 1.3935 | 0.079 | 0.769   | 1.860      |  12.65s | =         |
+| ibm04     | 1.3658 | 0.072 | 0.779   | 1.809      |  63.56s | -0.002    |
+| ibm06     | 1.7103 | 0.063 | 0.751   | 2.543      |  16.31s | +0.017 ❌ |
+| ibm07     | 1.4801 | 0.065 | 0.808   | 2.022      |  17.52s | =         |
+| ibm08     | 1.5224 | 0.070 | 0.840   | 2.066      |  20.45s | +0.003    |
+| ibm09     | 1.1088 | 0.058 | 0.820   | 1.283      |  17.55s | =         |
+| ibm10     | 1.3624 | 0.065 | 0.707   | 1.889      |  41.57s | =         |
+| ibm11     | 1.2390 | 0.055 | 0.847   | 1.520      |  21.36s | +0.010    |
+| ibm12     | 1.6440 | 0.061 | 0.755   | 2.412      |  33.85s | +0.023    |
+| ibm13     | 1.3908 | 0.054 | 0.875   | 1.799      |  24.48s | +0.013    |
+| ibm14     | 1.5988 | 0.051 | 0.948   | 2.146      |  45.08s | -0.002    |
+| ibm15     | 1.6034 | 0.058 | 0.917   | 2.173      |  34.14s | =         |
+| ibm16     | 1.5308 | 0.048 | 0.848   | 2.116      |  46.92s | =         |
+| ibm17     | 1.7494 | 0.053 | 0.941   | 2.452      |  68.17s | -0.001    |
+| ibm18     | 1.7865 | 0.053 | 1.034   | 2.433      |  38.66s | -0.001    |
+| **AVG**   |**1.4836**|     |         |            | 535s    | **+0.003** |
+
+### Analysis
+- **AVG 1.4836** — worse than S3 (1.4803) by 0.003
+- Per-benchmark overrides for ibm06 (+0.017) hurt — reheat disrupted convergence
+- ibm12 (+0.023) and ibm13 (+0.013) also regressed (stochastic noise)
+- ibm17 and ibm18 unchanged — overrides didn't help or hurt
+- **Congestion tracking infrastructure** added to SA but disabled (congestion_w=0):
+  - Full version (congestion_w=0.5) caused 2-3x slowdown AND worsened proxy
+  - Reduced version (congestion_w=0.15) still too slow (>30s per benchmark overhead)
+  - Root cause: per-iteration congestion cost computation (np.partition on full grid) is expensive, and simplified L-routing proxy doesn't match evaluator well
+- **Conclusion:** Per-benchmark overrides for ibm06/17/18 reverted. Congestion infrastructure kept in code but disabled.
+
+### What was tried on Apr 6 and DIDN'T help
+- **Congestion-aware SA acceptance (full weight)** — ibm01 went 1.136→1.159, ibm02 1.597→1.620. Proxy worse + 2x slower
+- **Congestion-aware SA (reduced weight 0.15x)** — still too slow, killed before completion
+- **Per-benchmark overrides for ibm06/17/18** (more iters + reheat) — ibm06 regressed +0.017, others unchanged
+
+### Current best remains: S3 = 1.4803 avg proxy
