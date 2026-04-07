@@ -55,7 +55,7 @@ def _safe_float(s: str) -> float | None:
 def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
     path = NOTES_ROOT / "(RL method)eklundnotes.md"
     text = path.read_text()
-    blocks = re.split(r"(?=^## )", text, flags=re.M)
+    blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
 
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
@@ -70,6 +70,8 @@ def parse_learning() -> tuple[list[RunRecord], list[dict[str, object]]]:
         if not block.startswith("## "):
             continue
         heading = block.splitlines()[0][3:].strip()
+        if "sa_v2" in heading.lower() or "sa v2" in heading.lower():
+            continue
         if "—" in heading:
             date, title = [part.strip() for part in heading.split("—", 1)]
         else:
@@ -178,24 +180,44 @@ def parse_hybrid() -> tuple[list[RunRecord], list[dict[str, object]]]:
         total_runtime_s = float(runtime_match.group(1)) if runtime_match else None
 
         benchmarks: list[BenchmarkRow] = []
+        # Only parse the FIRST table in the section (stop after AVG row)
+        in_table = False
         for line in section.splitlines():
             if not line.startswith("|"):
+                if in_table and benchmarks:
+                    break  # left the first table, stop
                 continue
+            in_table = True
             parts = [part.strip() for part in line.strip().strip("|").split("|")]
-            if len(parts) < 10:
+            if parts[0] in {"Benchmark", "-----------"}:
                 continue
-            if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
-                continue
+            if parts[0] == "**AVG**":
+                break  # end of first table
             if not re.fullmatch(r"ibm\d+", parts[0]):
+                continue
+            # Support both the original detailed hybrid table:
+            # Benchmark | Proxy | WL | Density | Congestion | ... | Time
+            # and later summary-only tables:
+            # Benchmark | Proxy | SA Baseline | RePlAce | vs SA | vs RePlAce | Overlaps
+            wl = density = congestion = time_s = None
+            if len(parts) >= 10:
+                wl = _safe_float(parts[2])
+                density = _safe_float(parts[3])
+                congestion = _safe_float(parts[4])
+                time_s = parse_time_seconds(parts[9])
+            elif len(parts) >= 7:
+                wl = density = congestion = None
+                time_s = None
+            else:
                 continue
             benchmarks.append(
                 BenchmarkRow(
                     benchmark=parts[0],
                     proxy=float(parts[1]),
-                    wl=float(parts[2]),
-                    density=float(parts[3]),
-                    congestion=float(parts[4]),
-                    time_s=parse_time_seconds(parts[9]),
+                    wl=wl,
+                    density=density,
+                    congestion=congestion,
+                    time_s=time_s,
                 )
             )
 
@@ -392,12 +414,13 @@ def write_summary_markdown(runs: list[RunRecord]) -> None:
 
 
 def plot_history(runs: list[RunRecord]) -> None:
-    method_order = ["Learning Placer", "SA Placer", "Analytical Placer", "HybridPlacer"]
+    method_order = ["Learning Placer", "SA Placer", "Analytical Placer", "HybridPlacer", "SA V2 (Eklund)"]
     colors = {
         "Learning Placer": "#1f77b4",
         "SA Placer": "#d62728",
         "Analytical Placer": "#2ca02c",
         "HybridPlacer": "#ff7f0e",
+        "SA V2 (Eklund)": "#9467bd",
     }
 
     x_positions = {run.run_id: idx for idx, run in enumerate(runs, start=1)}
@@ -466,11 +489,114 @@ def plot_history(runs: list[RunRecord]) -> None:
     plt.close(fig)
 
 
+def parse_sa_v2() -> tuple[list[RunRecord], list[dict[str, object]]]:
+    """Parse SA V2 (Eklund) results from the RL/Eklund notes file.
+
+    SA V2 sections are identified by headings containing 'SA V2' or
+    'sa_v2' and use the same table format as the Learning Placer entries.
+    """
+    path = NOTES_ROOT / "(RL method)eklundnotes.md"
+    if not path.exists():
+        return [], []
+    text = path.read_text()
+    blocks = re.split(r"(?=^## (?!#))", text, flags=re.M)
+
+    runs: list[RunRecord] = []
+    rows: list[dict[str, object]] = []
+    run_index = 0
+
+    for block in blocks:
+        if not block.startswith("## "):
+            continue
+        heading = block.splitlines()[0][3:].strip()
+        # Only parse SA V2 sections
+        if "sa_v2" not in heading.lower() and "sa v2" not in heading.lower():
+            continue
+
+        if "—" in heading:
+            date, title = [part.strip() for part in heading.split("—", 1)]
+        else:
+            date, title = "", heading
+
+        method = "SA V2 (Eklund)"
+        benchmarks: list[BenchmarkRow] = []
+
+        full_suite_avg = None
+        table_match = re.search(
+            r"^\| Benchmark \|.*?^\|\s*\*\*AVG\*\*\s*\|\s*\*\*([0-9.]+)\*\*.*$",
+            block,
+            flags=re.M | re.S,
+        )
+        if table_match:
+            full_suite_avg = float(table_match.group(1))
+
+        for line in block.splitlines():
+            if not line.startswith("|"):
+                continue
+            parts = [part.strip() for part in line.strip().strip("|").split("|")]
+            if len(parts) < 6:
+                continue
+            if parts[0] in {"Benchmark", "-----------", "**AVG**"}:
+                continue
+            if not re.fullmatch(r"ibm\d+", parts[0]):
+                continue
+            benchmarks.append(
+                BenchmarkRow(
+                    benchmark=parts[0],
+                    proxy=float(parts[1]),
+                    wl=_safe_float(parts[2]),
+                    density=_safe_float(parts[3]),
+                    congestion=_safe_float(parts[4]),
+                    time_s=parse_time_seconds(parts[5]),
+                )
+            )
+
+        if not benchmarks:
+            continue
+
+        run_index += 1
+        run_id = f"V{run_index}"
+        plotted_proxy = full_suite_avg if full_suite_avg is not None else mean(b.proxy for b in benchmarks)
+        total_runtime_s = sum(b.time_s for b in benchmarks if b.time_s is not None) or None
+        scope = "full_suite" if full_suite_avg is not None else "partial"
+        runs.append(
+            RunRecord(
+                run_id=run_id,
+                method=method,
+                date=date,
+                title=title,
+                scope=scope,
+                benchmarks_logged=len(benchmarks),
+                plotted_proxy=plotted_proxy,
+                full_suite_avg_proxy=full_suite_avg,
+                total_runtime_s=total_runtime_s,
+                source_file=path.name,
+                source_heading=heading,
+            )
+        )
+        for benchmark in benchmarks:
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "method": method,
+                    "benchmark": benchmark.benchmark,
+                    "proxy": benchmark.proxy,
+                    "wl": benchmark.wl,
+                    "density": benchmark.density,
+                    "congestion": benchmark.congestion,
+                    "time_s": benchmark.time_s,
+                    "source_file": path.name,
+                }
+            )
+
+    return runs, rows
+
+
 def main() -> None:
     runs: list[RunRecord] = []
     rows: list[dict[str, object]] = []
 
-    for parser in (parse_learning, parse_sa_analytical, parse_hybrid):
+    for parser in (parse_learning, parse_sa_analytical, parse_hybrid, parse_sa_v2):
         parser_runs, parser_rows = parser()
         runs.extend(parser_runs)
         rows.extend(parser_rows)
@@ -480,7 +606,7 @@ def main() -> None:
     rows = [row for row in rows if str(row["run_id"]) in full_suite_ids]
 
     def run_sort_key(run_id: str) -> tuple[int, int]:
-        prefix_order = {"L": 1, "S": 2, "A": 3, "H": 4}
+        prefix_order = {"L": 1, "S": 2, "A": 3, "H": 4, "V": 5}
         match = re.fullmatch(r"([A-Z])(\d+)", run_id)
         if not match:
             return (999, 999)

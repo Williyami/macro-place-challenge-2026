@@ -134,3 +134,104 @@ The research-paper improvements helped density but didn't yet translate to overa
 Notable improvements: ibm04 (1.4569→1.4279), ibm11 (1.3852→1.3709).
 Notable regressions: ibm12 (1.9648→1.9361 better), ibm06 still worst (2.0281).
 Now beats SA on 16/17 (was 15/17) — ibm03 is the only loss.
+
+## 2026-04-06 — v4: Congestion-focused overhaul + compute increase
+
+Changes:
+- **Congestion weight 10-20x increase**: GNN fine-tune max 0.025→0.5, refinement stage 2 up to 1.0
+- **Two-stage refinement**: stage 1 (40%) WL+overlap focus, stage 2 (60%) congestion-heavy
+- **Evaluator grid dims**: density penalty uses actual `grid_col`/`grid_row` instead of hardcoded 16
+- **Benchmark-specific density target**: computed from actual macro utilization (×1.2 slack)
+- **Best GNN checkpoint tracking**: restores best epoch by WL+congestion, not last
+- **LR warmup + cosine decay**: for GNN fine-tuning stability
+- **Initial.plc multi-start**: extra SA-only run from original positions with 1.5× SA iters
+- **Compute budget increase**: finetune 100→400, refine 300→800, SA 100K→500K, starts 3→5+1
+- **Retrained GNN** with matching congestion weight fix
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.1477 | 0.067 | 0.859 | 1.304 | 671.70s | BETTER (1.3166) |
+| ibm02 | 1.5618 | 0.076 | 0.690 | 2.282 | 388.45s | BETTER (1.9072) |
+| ibm03 | 1.7196 | 0.079 | 1.065 | 2.217 | 536.91s | BETTER (1.7401) |
+| ibm04 | 1.3948 | 0.069 | 0.780 | 1.871 | 710.03s | BETTER (1.5037) |
+| ibm06 | 1.6858 | 0.063 | 0.704 | 2.543 | 429.12s | BETTER (2.5057) |
+| ibm07 | 1.4806 | 0.065 | 0.806 | 2.025 | 612.93s | BETTER (2.0229) |
+| ibm08 | 1.7002 | 0.068 | 0.940 | 2.324 | 793.02s | BETTER (1.9239) |
+| ibm09 | 1.1825 | 0.057 | 0.895 | 1.355 | 770.13s | BETTER (1.3875) |
+| ibm10 | 1.6436 | 0.058 | 0.958 | 2.214 | 1476.55s | BETTER (2.1108) |
+| ibm11 | 1.3557 | 0.054 | 0.979 | 1.624 | 634.07s | BETTER (1.7111) |
+| ibm12 | 1.6348 | 0.060 | 0.750 | 2.400 | 971.40s | BETTER (2.8261) |
+| ibm13 | 1.5596 | 0.054 | 1.024 | 1.988 | 592.36s | BETTER (1.9141) |
+| ibm14 | 1.5885 | 0.051 | 0.946 | 2.129 | 1378.06s | BETTER (2.2750) |
+| ibm15 | 1.7827 | 0.057 | 1.069 | 2.381 | 2703.37s | BETTER (2.3000) |
+| ibm16 | 1.5033 | 0.049 | 0.811 | 2.098 | 1321.16s | BETTER (2.2337) |
+| ibm17 | 1.7580 | 0.052 | 0.945 | 2.467 | 1438.32s | BETTER (3.6726) |
+| ibm18 | 1.7984 | 0.053 | 1.043 | 2.447 | 674.22s | BETTER (2.7755) |
+| **AVG** | **1.5587** | | | | 16101.83s | **SA: 2.1251** |
+
+Beat SA baseline on 17/17. Beat RePlAce on 2/17 (ibm02, ibm12).
+**Major improvement: 1.6353 → 1.5587 (-4.7%).**
+Congestion-focused changes drove big gains on ibm06 (-16.9%), ibm07 (-10.8%), ibm16 (-9.7%), ibm12 (-15.6%).
+Density scores excellent (mostly 0.7-1.0). Congestion still the main gap vs RePlAce.
+Close to RePlAce on ibm07 (-1.2%), ibm18 (-1.5%), ibm16 (-1.7%).
+
+## 2026-04-06 — SA V2: GPU-assisted post-refinement with CPU fallback
+
+Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC, greedy local search, and GPU-assisted post-refinement
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.2564 | 0.088 | 0.927 | 1.410 | 80.75s | BETTER (1.3166) |
+| ibm02 | 1.6908 | 0.085 | 0.783 | 2.429 | 77.08s | BETTER (1.9072) |
+| ibm03 | 1.4712 | 0.086 | 0.829 | 1.940 | 62.24s | BETTER (1.7401) |
+| ibm04 | 1.5237 | 0.078 | 0.886 | 2.005 | 262.14s | WORSE (1.5037) |
+| ibm06 | 1.7958 | 0.067 | 0.788 | 2.669 | 58.71s | BETTER (2.5057) |
+| ibm07 | 1.5767 | 0.068 | 0.901 | 2.118 | 78.22s | BETTER (2.0229) |
+| ibm08 | 1.6220 | 0.074 | 0.935 | 2.161 | 95.94s | BETTER (1.9239) |
+| ibm09 | 1.2071 | 0.060 | 0.898 | 1.396 | 74.49s | BETTER (1.3875) |
+| ibm10 | 1.5070 | 0.076 | 0.746 | 2.117 | 324.50s | BETTER (2.1108) |
+| ibm11 | 1.3136 | 0.057 | 0.917 | 1.597 | 98.48s | BETTER (1.7111) |
+| ibm12 | 1.7353 | 0.066 | 0.799 | 2.540 | 285.93s | BETTER (2.8261) |
+| ibm13 | 1.4951 | 0.057 | 0.950 | 1.927 | 111.21s | BETTER (1.9141) |
+| ibm14 | 1.6527 | 0.054 | 0.998 | 2.201 | 371.52s | BETTER (2.2750) |
+| ibm15 | 1.6473 | 0.059 | 0.976 | 2.201 | 196.69s | BETTER (2.3000) |
+| ibm16 | 1.6145 | 0.050 | 0.910 | 2.218 | 407.15s | BETTER (2.2337) |
+| ibm17 | 1.7702 | 0.054 | 0.967 | 2.465 | 712.17s | BETTER (3.6726) |
+| ibm18 | 1.8050 | 0.053 | 1.058 | 2.446 | 181.13s | BETTER (2.7755) |
+| **AVG** | **1.5697** | | | | 3478.35s | **SA: 2.1251** |
+
+Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
+**Result:** Much better than the SA baseline, but still behind our best logged SA V1 run (1.4803) and the current learning placer (1.5587).
+The GPU-assisted fallback path is integrated and validated, but this first SA V2 full-suite run is still congestion-limited on ibm04/ibm10/ibm17.
+
+## 2026-04-07 — SA V2: fast full-suite rerun (`--no-media`)
+
+Method: `PLACER_METHOD=sa_v2` — SA V2 with HPWL caching, adaptive moves, LAHC, greedy local search, and GPU-assisted post-refinement
+
+### Full suite run (this config):
+| Benchmark | Proxy | WL | Density | Congestion | Time | vs SA baseline |
+|-----------|-------|-----|---------|------------|------|----------------|
+| ibm01 | 1.2515 | 0.088 | 0.934 | 1.393 | 23.43s | BETTER (1.3166) |
+| ibm02 | 1.6672 | 0.086 | 0.768 | 2.395 | 14.96s | BETTER (1.9072) |
+| ibm03 | 1.5042 | 0.087 | 0.834 | 2.000 | 15.90s | BETTER (1.7401) |
+| ibm04 | 1.5122 | 0.078 | 0.882 | 1.987 | 97.32s | WORSE (1.5037) |
+| ibm06 | 1.7702 | 0.066 | 0.803 | 2.607 | 15.51s | BETTER (2.5057) |
+| ibm07 | 1.5731 | 0.068 | 0.892 | 2.119 | 21.37s | BETTER (2.0229) |
+| ibm08 | 1.6782 | 0.076 | 0.922 | 2.282 | 31.19s | BETTER (1.9239) |
+| ibm09 | 1.2071 | 0.061 | 0.902 | 1.390 | 22.93s | BETTER (1.3875) |
+| ibm10 | 1.5059 | 0.076 | 0.740 | 2.120 | 48.62s | BETTER (2.1108) |
+| ibm11 | 1.3292 | 0.058 | 0.916 | 1.627 | 28.50s | BETTER (1.7111) |
+| ibm12 | 1.7301 | 0.066 | 0.804 | 2.525 | 45.90s | BETTER (2.8261) |
+| ibm13 | 1.5038 | 0.057 | 0.946 | 1.948 | 28.28s | BETTER (1.9141) |
+| ibm14 | 1.6763 | 0.054 | 1.004 | 2.240 | 57.27s | BETTER (2.2750) |
+| ibm15 | 1.6607 | 0.059 | 0.998 | 2.205 | 46.20s | BETTER (2.3000) |
+| ibm16 | 1.6149 | 0.051 | 0.897 | 2.231 | 58.27s | BETTER (2.2337) |
+| ibm17 | 1.7691 | 0.054 | 0.969 | 2.461 | 74.23s | BETTER (3.6726) |
+| ibm18 | 1.8011 | 0.053 | 1.055 | 2.440 | 39.07s | BETTER (2.7755) |
+| **AVG** | **1.5738** | | | | 668.95s | **SA: 2.1251** |
+
+Beat SA baseline on 16/17. Beat RePlAce on 1/17 (ibm02).
+**Result:** Quality is essentially tied with the previous SA V2 full-suite run (1.5697 -> 1.5738, +0.3%), but runtime improved dramatically (3478.35s -> 668.95s, about 5.2x faster).
+This keeps SA V2 clearly ahead of the SA baseline while making it much more practical under the competition runtime limit.

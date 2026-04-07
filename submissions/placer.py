@@ -10,6 +10,7 @@ Switch methods via env var:
     PLACER_METHOD=hybrid      uv run evaluate submissions/placer.py --all
     PLACER_METHOD=learning    uv run evaluate submissions/placer.py --all
     PLACER_METHOD=will_seed   uv run evaluate submissions/placer.py --all
+    PLACER_METHOD=sa_v2       uv run evaluate submissions/placer.py --all
 """
 
 import os
@@ -56,13 +57,29 @@ class MacroPlacer:
         elif METHOD == "learning":
             from submissions.learning_placer import LearningPlacer
             self._inner = LearningPlacer(seed=seed)
+        elif METHOD == "sa_v2":
+            from submissions.sa_v2_placer import SAV2Placer
+            self._inner = SAV2Placer(
+                seed=seed,
+                max_iters=120_000,
+                run_fd=False,
+                snapshot_interval=2_000,
+                trace_interval=500,
+                t_start_factor=0.12,
+                t_end_factor=0.0008,
+                reheat_threshold=5_000,
+                lahc_length=200,
+                greedy_tail_frac=0.05,
+                greedy_local_passes=3,
+                adaptive_moves=True,
+            )
         elif METHOD == "will_seed":
             from submissions.will_seed.placer import WillSeedPlacer
             self._inner = WillSeedPlacer(seed=seed)
         else:
             raise ValueError(
                 f"Unknown PLACER_METHOD={METHOD!r}. "
-                "Options: sa, analytical, hybrid, learning, will_seed"
+                "Options: sa, analytical, hybrid, learning, will_seed, sa_v2"
             )
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:

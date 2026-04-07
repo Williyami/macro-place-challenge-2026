@@ -62,8 +62,8 @@ results/
 !benchmarks/processed/public/
 !benchmarks/processed/public/*.pt
 
-# Research papers (large PDFs, not for repo)
-notes/researchmaterial/
+# Research papers — folder tracked, PDFs ignored via notes/researchmaterial/.gitignore
+!notes/researchmaterial/
 
 # Logs
 *.log

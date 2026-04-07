@@ -13,21 +13,24 @@
 # Run a specific method on all IBM benchmarks
 PLACER_METHOD=learning uv run evaluate submissions/placer.py --all --no-media
 
-# Available methods: sa, analytical, hybrid, learning, will_seed
+# Available methods: sa, analytical, hybrid, learning, will_seed, sa_v2
 ```
 
 ## After Running Benchmarks
 
-Every time you run benchmarks, you MUST do all three of these steps:
+Every time you run the full IBM benchmark suite (`--all`), you MUST do all three of these steps.
+Do not do these logging/update steps for quick single-benchmark test runs.
 
 ### 1. Log results to the correct notes file
 
 Each team member has their own notes file:
 - Learning/RL placer (Person 3): `notes/(RL method)eklundnotes.md`
 - SA + Analytical placer (Person 1): `notes/(SA + Analytical method) Omnellnotes.md`
-- Hybrid placer (Person 2): `notes/(Hybrid method)novaknotes.md`
+- Hybrid placer (GPU-accelerated analytical phase, Person 2): `notes/(Hybrid method)novaknotes.md`
 
 Add a new `## Date — Description` section with a markdown table matching the existing format in that file. Include: Benchmark, Proxy, WL, Density, Congestion, Time, and vs SA baseline comparison.
+
+**SA V2 (Eklund)**: Log to `notes/(RL method)eklundnotes.md` with "SA V2" in the heading (e.g. `## 2026-04-06 — SA V2: description`). The benchmark history generator identifies SA V2 sections by looking for "SA V2" or "sa_v2" in the heading.
 
 ### 2. Regenerate the benchmark history graph
 
@@ -53,6 +56,11 @@ uv run python submissions/pretrain_learning.py --epochs 50 --rounds 5 --augment-
 ```
 
 Weights save to `submissions/learning_weights/gnn_pretrained.pt`. Always re-run benchmarks after retraining.
+
+## Key Files for SA V2 Placer (Eklund)
+
+- `submissions/sa_v2_placer.py` — SA V2 with HPWL caching, adaptive moves, LAHC, greedy local search
+- `submissions/sa_placer.py` — Original SA V1 (kept as baseline)
 
 ## Key Files for Learning Placer
 

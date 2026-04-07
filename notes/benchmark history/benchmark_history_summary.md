@@ -15,6 +15,7 @@ This graph summarizes the full-suite benchmark sections logged in the notes.
 | L2 | Learning Placer | 2026-04-04 | full_suite | 1.7060 | 17 |
 | L3 | Learning Placer | 2026-04-04 | full_suite | 1.6282 | 17 |
 | L4 | Learning Placer | 2026-04-05 | full_suite | 1.6353 | 17 |
+| L5 | Learning Placer | 2026-04-06 | full_suite | 1.5587 | 17 |
 | S1 | SA Placer | 2026-04-03 | full_suite | 1.5765 | 17 |
 | S2 | SA Placer | 2026-04-04 | full_suite | 1.4850 | 17 |
 | S3 | SA Placer | 2026-04-04, v2 | full_suite | 1.4803 | 17 |
@@ -25,5 +26,9 @@ This graph summarizes the full-suite benchmark sections logged in the notes.
 | A3 | Analytical Placer | 2026-04-05 | full_suite | 1.7232 | 17 |
 | H1 | HybridPlacer | 2026-04-03 | full_suite | 1.6972 | 17 |
 | H2 | HybridPlacer | 2026-04-04, --no-media | full_suite | 1.6977 | 17 |
+| H3 | HybridPlacer | 2026-04-06 | full_suite | 1.6966 | 17 |
+| H4 | HybridPlacer | 2026-04-07, v4 --no-media | full_suite | 1.5954 | 17 |
+| V1 | SA V2 (Eklund) | 2026-04-06 | full_suite | 1.5697 | 17 |
+| V2 | SA V2 (Eklund) | 2026-04-07 | full_suite | 1.5738 | 17 |
 
 Raw parsed data: [benchmark_history_raw.md](benchmark_history_raw.md)

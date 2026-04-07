@@ -1,0 +1,4 @@
+# Track only .md files — ignore PDFs and other binary research papers
+*
+!.gitignore
+!*.md

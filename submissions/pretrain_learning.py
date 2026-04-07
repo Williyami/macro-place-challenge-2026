@@ -37,7 +37,7 @@ from macro_place.loader import load_benchmark_from_dir, load_benchmark
 from submissions.learning_placer import (
     NetlistGNN, _build_net_tensors, _build_features,
     _lse_hpwl, _smooth_density_penalty, _smooth_overlap_penalty,
-    _rudy_congestion_proxy,
+    _rudy_congestion_proxy, _learning_device,
 )
 from submissions.sa_placer import _load_plc, _extract_nets
 
@@ -150,6 +150,22 @@ def _extract_training_data(name: str, benchmark: Benchmark):
         "hrouting_alloc": halloc,
         "vrouting_alloc": valloc,
     }
+
+
+def _move_data_to_device(data: dict, device: torch.device) -> dict:
+    """Move all tensor fields in training data dict to the given device."""
+    moved = dict(data)
+    for key in ("net_batches",):
+        moved[key] = [(idx.to(device), ox.to(device), oy.to(device),
+                        fb.to(device), w.to(device))
+                       for idx, ox, oy, fb, w in data[key]]
+    for key in ("node_features", "adj_norm", "sizes", "half_w", "half_h",
+                "movable", "fixed_mask", "orig_pos"):
+        if key in data and isinstance(data[key], torch.Tensor):
+            moved[key] = data[key].to(device)
+    if "local_net_indices" in data and data["local_net_indices"]:
+        moved["local_net_indices"] = [t.to(device) for t in data["local_net_indices"]]
+    return moved
 
 
 # ── Data augmentation ──────────────────────────────────────────────────────
@@ -298,9 +314,11 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
     # Global HPWL loss
     loss_wl = _lse_hpwl(pos, data["net_batches"], gamma)
 
-    # Density loss
+    # Density loss (use actual evaluator grid dims)
     loss_den = _smooth_density_penalty(
-        pos, sizes, cw, ch, grid_n=16, target_util=0.5
+        pos, sizes, cw, ch,
+        grid_col=data.get("grid_col", 16), grid_row=data.get("grid_row", 16),
+        target_util=0.5
     ) * (cw * ch) * (0.01 + 0.04 * frac)
 
     # Overlap loss
@@ -312,7 +330,7 @@ def train_step(gnn, optimizer, data, gamma, frac, use_congestion=True,
 
     # RUDY-based congestion loss (matches actual evaluator metric)
     if use_congestion:
-        cong_weight = 0.5 * (0.01 + 0.04 * frac)
+        cong_weight = 0.1 + 0.4 * frac
         loss_cong = _rudy_congestion_proxy(
             pos, sizes,
             net_batches=data["net_batches"],
@@ -369,6 +387,9 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    device = _learning_device()
+    print(f"Using device: {device}")
+
     # ── Load all benchmarks ────────────────────────────────────────────
     print("Loading benchmarks...")
     all_data = []
@@ -410,11 +431,14 @@ def main():
         print(f"\nCurriculum order (easy→hard): "
               + ", ".join(f"{d['name']}({d['n_hard']})" for d in all_data))
 
+    # Move all benchmark data to device
+    all_data = [_move_data_to_device(d, device) for d in all_data]
+
     # All benchmarks should have in_dim=9
     in_dim = all_data[0]["node_features"].shape[1]
     print(f"\nFeature dim: {in_dim}, Benchmarks: {len(all_data)}")
 
-    gnn = NetlistGNN(in_dim=in_dim, hidden_dim=128, out_dim=2, num_layers=4)
+    gnn = NetlistGNN(in_dim=in_dim, hidden_dim=128, out_dim=2, num_layers=4).to(device)
 
     # Determine augmentation transforms to use
     n_transforms = 1 if args.no_augment else min(args.augment_transforms, 8)
@@ -526,10 +550,10 @@ def main():
               f"avg_loss={avg_loss:.2f}, avg_wl={avg_wl:.2f}, "
               f"steps={round_steps}, time={elapsed:.1f}s")
 
-    # Save weights
+    # Save weights (always on CPU for portability)
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = WEIGHTS_DIR / "gnn_pretrained.pt"
-    torch.save(gnn.state_dict(), out_path)
+    torch.save({k: v.cpu() for k, v in gnn.state_dict().items()}, out_path)
     print(f"\nWeights saved to {out_path}")
     print(f"Total training time: {time.time() - t0:.1f}s")
 

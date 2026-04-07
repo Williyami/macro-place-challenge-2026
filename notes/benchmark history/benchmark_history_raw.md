@@ -10,6 +10,7 @@ Generated from the note files in this directory.
 | L2 | Learning Placer | 2026-04-04 | Full suite rerun (`--no-media`) | full_suite | 17 | 1.7060 | 1.7060 | 457.74 | (RL method)eklundnotes.md |
 | L3 | Learning Placer | 2026-04-04 | v2: Pre-trained GNN + Density-aware SA + Greedy Flipping | full_suite | 17 | 1.6282 | 1.6282 | 84.55 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | 2026-04-05 | v3: Research-paper-informed pretraining improvements | full_suite | 17 | 1.6353 | 1.6353 | 2275.30 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | 2026-04-06 | v4: Congestion-focused overhaul + compute increase | full_suite | 17 | 1.5587 | 1.5587 | 16101.80 | (RL method)eklundnotes.md |
 | S1 | SA Placer | 2026-04-03 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.5765 | 1.5765 | 215.00 | (SA + Analytical method) Omnellnotes.md |
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
@@ -20,6 +21,10 @@ Generated from the note files in this directory.
 | A3 | Analytical Placer | 2026-04-05 | Analytical Placer v3 (PLACER_METHOD=analytical) | full_suite | 17 | 1.7232 | 1.7232 | 1362.00 | (SA + Analytical method) Omnellnotes.md |
 | H1 | HybridPlacer | 2026-04-03 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6972 | 1.6972 | 1492.67 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | 2026-04-04, --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6977 | 1.6977 | 324.72 | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | 2026-04-06 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.6966 | 1.6966 | 3998.65 | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | 2026-04-07, v4 --no-media | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.5954 | 1.5954 | 12369.19 | (Hybrid method)novaknotes.md |
+| V1 | SA V2 (Eklund) | 2026-04-06 | SA V2: GPU-assisted post-refinement with CPU fallback | full_suite | 17 | 1.5697 | 1.5697 | 3478.35 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | 2026-04-07 | SA V2: fast full-suite rerun (`--no-media`) | full_suite | 17 | 1.5738 | 1.5738 | 668.95 | (RL method)eklundnotes.md |
 
 ## Benchmark-Level Records
 
@@ -93,6 +98,23 @@ Generated from the note files in this directory.
 | L4 | Learning Placer | ibm16 | 1.6646 | 0.049 | 0.934 | 2.297 | 153.31 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm17 | 1.7720 | 0.053 | 0.954 | 2.485 | 210.96 | (RL method)eklundnotes.md |
 | L4 | Learning Placer | ibm18 | 1.8005 | 0.053 | 1.042 | 2.453 | 110.45 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm01 | 1.1477 | 0.067 | 0.859 | 1.304 | 671.70 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm02 | 1.5618 | 0.076 | 0.690 | 2.282 | 388.45 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm03 | 1.7196 | 0.079 | 1.065 | 2.217 | 536.91 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm04 | 1.3948 | 0.069 | 0.780 | 1.871 | 710.03 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm06 | 1.6858 | 0.063 | 0.704 | 2.543 | 429.12 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm07 | 1.4806 | 0.065 | 0.806 | 2.025 | 612.93 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm08 | 1.7002 | 0.068 | 0.940 | 2.324 | 793.02 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm09 | 1.1825 | 0.057 | 0.895 | 1.355 | 770.13 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm10 | 1.6436 | 0.058 | 0.958 | 2.214 | 1476.55 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm11 | 1.3557 | 0.054 | 0.979 | 1.624 | 634.07 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm12 | 1.6348 | 0.060 | 0.750 | 2.400 | 971.40 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm13 | 1.5596 | 0.054 | 1.024 | 1.988 | 592.36 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm14 | 1.5885 | 0.051 | 0.946 | 2.129 | 1378.06 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm15 | 1.7827 | 0.057 | 1.069 | 2.381 | 2703.37 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm16 | 1.5033 | 0.049 | 0.811 | 2.098 | 1321.16 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm17 | 1.7580 | 0.052 | 0.945 | 2.467 | 1438.32 | (RL method)eklundnotes.md |
+| L5 | Learning Placer | ibm18 | 1.7984 | 0.053 | 1.043 | 2.447 | 674.22 | (RL method)eklundnotes.md |
 | S1 | SA Placer | ibm01 | 1.2923 | 0.067 | 1.070 | 1.381 | 12.50 | (SA + Analytical method) Omnellnotes.md |
 | S1 | SA Placer | ibm02 | 1.7310 | 0.075 | 0.901 | 2.411 | 7.32 | (SA + Analytical method) Omnellnotes.md |
 | S1 | SA Placer | ibm03 | 1.4484 | 0.078 | 0.895 | 1.846 | 7.54 | (SA + Analytical method) Omnellnotes.md |
@@ -263,3 +285,71 @@ Generated from the note files in this directory.
 | H2 | HybridPlacer | ibm16 | 1.7381 | 0.047 | 1.050 | 2.331 | 23.69 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm17 | 1.7802 | 0.052 | 1.003 | 2.453 | 24.28 | (Hybrid method)novaknotes.md |
 | H2 | HybridPlacer | ibm18 | 1.8326 | 0.053 | 1.106 | 2.454 | 10.89 | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm01 | 1.2362 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm02 | 1.7591 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm03 | 1.7848 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm04 | 1.6224 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm06 | 2.0324 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm07 | 1.6864 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm08 | 1.8275 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm09 | 1.2505 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm10 | 1.6908 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm11 | 1.4337 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm12 | 1.9814 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm13 | 1.6423 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm14 | 1.7259 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm15 | 1.8156 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm16 | 1.7436 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm17 | 1.7761 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H3 | HybridPlacer | ibm18 | 1.8340 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm01 | 1.1782 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm02 | 1.6815 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm03 | 1.7161 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm04 | 1.4399 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm06 | 1.9132 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm07 | 1.5315 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm08 | 1.6530 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm09 | 1.1387 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm10 | 1.6386 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm11 | 1.3913 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm12 | 1.9018 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm13 | 1.5037 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm14 | 1.6309 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm15 | 1.6724 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm16 | 1.5795 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm17 | 1.7543 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H4 | HybridPlacer | ibm18 | 1.7968 | - | - | - | - | (Hybrid method)novaknotes.md |
+| V1 | SA V2 (Eklund) | ibm01 | 1.2564 | 0.088 | 0.927 | 1.410 | 80.75 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm02 | 1.6908 | 0.085 | 0.783 | 2.429 | 77.08 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm03 | 1.4712 | 0.086 | 0.829 | 1.940 | 62.24 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm04 | 1.5237 | 0.078 | 0.886 | 2.005 | 262.14 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm06 | 1.7958 | 0.067 | 0.788 | 2.669 | 58.71 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm07 | 1.5767 | 0.068 | 0.901 | 2.118 | 78.22 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm08 | 1.6220 | 0.074 | 0.935 | 2.161 | 95.94 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm09 | 1.2071 | 0.060 | 0.898 | 1.396 | 74.49 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm10 | 1.5070 | 0.076 | 0.746 | 2.117 | 324.50 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm11 | 1.3136 | 0.057 | 0.917 | 1.597 | 98.48 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm12 | 1.7353 | 0.066 | 0.799 | 2.540 | 285.93 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm13 | 1.4951 | 0.057 | 0.950 | 1.927 | 111.21 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm14 | 1.6527 | 0.054 | 0.998 | 2.201 | 371.52 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm15 | 1.6473 | 0.059 | 0.976 | 2.201 | 196.69 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm16 | 1.6145 | 0.050 | 0.910 | 2.218 | 407.15 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm17 | 1.7702 | 0.054 | 0.967 | 2.465 | 712.17 | (RL method)eklundnotes.md |
+| V1 | SA V2 (Eklund) | ibm18 | 1.8050 | 0.053 | 1.058 | 2.446 | 181.13 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm01 | 1.2515 | 0.088 | 0.934 | 1.393 | 23.43 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm02 | 1.6672 | 0.086 | 0.768 | 2.395 | 14.96 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm03 | 1.5042 | 0.087 | 0.834 | 2.000 | 15.90 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm04 | 1.5122 | 0.078 | 0.882 | 1.987 | 97.32 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm06 | 1.7702 | 0.066 | 0.803 | 2.607 | 15.51 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm07 | 1.5731 | 0.068 | 0.892 | 2.119 | 21.37 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm08 | 1.6782 | 0.076 | 0.922 | 2.282 | 31.19 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm09 | 1.2071 | 0.061 | 0.902 | 1.390 | 22.93 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm10 | 1.5059 | 0.076 | 0.740 | 2.120 | 48.62 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm11 | 1.3292 | 0.058 | 0.916 | 1.627 | 28.50 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm12 | 1.7301 | 0.066 | 0.804 | 2.525 | 45.90 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm13 | 1.5038 | 0.057 | 0.946 | 1.948 | 28.28 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm14 | 1.6763 | 0.054 | 1.004 | 2.240 | 57.27 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm15 | 1.6607 | 0.059 | 0.998 | 2.205 | 46.20 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm16 | 1.6149 | 0.051 | 0.897 | 2.231 | 58.27 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm17 | 1.7691 | 0.054 | 0.969 | 2.461 | 74.23 | (RL method)eklundnotes.md |
+| V2 | SA V2 (Eklund) | ibm18 | 1.8011 | 0.053 | 1.055 | 2.440 | 39.07 | (RL method)eklundnotes.md |
