@@ -8,8 +8,6 @@ Partcl and Hudson River Trading are excited to co-host a competition to solve th
 
 ## 🏅 Leaderboard
 
-Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks. Scores are unverified until confirmed by judges.
-
 | Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Runtime | Verified |
 |------|------|---------------|------|-------|----------|---------|----------|
 | 1 | "MTK" (DreamPlace++) | 1.3998 | — | — | 0 | 25s/bench |  |
@@ -18,12 +16,12 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 4 | "Convex Optimization" (UWaterloo Student) | 1.4556 | — | — | 0 | 16s total |  |
 | 5 | "another Waterloo kid" (Batched Nesterov GP) | 1.4568 | — | — | 0 | 118s/bench |  |
 | — | RePlAce (baseline) | 1.4578 | 0.9976 | 1.8370 | 0 | — | ✅ |
-| **6** | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
-| 7 | "UTAUSTIN-CT" (PLC-Exact Congestion-Aware SA) | 1.5062 | — | — | 0 | 35s/bench |  |
-| 8 | "oracleX" (Oracle) | 1.5130 | — | — | 0 | 3min/bench |  |
-| 9 | "CA" (congestion_aware) | 1.5238 | — | — | 0 | 13s/bench |  |
-| 10 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
-| **11** | **Learning Placer (ours)** | **1.5587** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
+| **6** | **Learning Placer (ours)** | **1.4828** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
+| **7** | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
+| 8 | "UTAUSTIN-CT" (PLC-Exact Congestion-Aware SA) | 1.5062 | — | — | 0 | 35s/bench |  |
+| 9 | "oracleX" (Oracle) | 1.5130 | — | — | 0 | 3min/bench |  |
+| 10 | "CA" (congestion_aware) | 1.5238 | — | — | 0 | 13s/bench |  |
+| 11 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | ✅ |
 | **12** | **HybridPlacer v5 (ours)** | **1.5723** | **1.1204** | **1.8583** | **0** | **24641.71s total** |  |
 | **13** | **SA V2 (Eklund, ours)** | **1.5738** | **1.2071** | **1.8011** | **0** | **668.95s total** |  |
 | 14 | "Cezar" (CRISP) | 1.5806 | — | — | 0 | 10min/bench |  |
@@ -34,6 +32,7 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | ✅ |
 
 *Submit your results to appear on the leaderboard!*
+
 ## 📈 Benchmark History
 
 Benchmark-history tracking for the note sections lives in:
