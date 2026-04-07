@@ -682,14 +682,149 @@ def _build_features(benchmark: Benchmark, plc, nets_raw: list,
 
 # ── Main placer ─────────────────────────────────────────────────────────────
 
+def _gpu_post_legalization_refine(
+    pos_np: np.ndarray, benchmark: Benchmark, plc,
+    nets_raw: list, n_hard: int,
+    sizes_np: np.ndarray, movable_np: np.ndarray,
+    cw: float, ch: float,
+    num_steps: int = 300,
+    lr: float = 0.15,
+    gamma: float = 4.0,
+) -> np.ndarray:
+    """
+    GPU-accelerated differentiable refinement after legalization.
+
+    Optimizes HPWL + density + congestion + overlap on GPU using Adam,
+    then re-legalizes. Only keeps the result if proxy cost improves.
+    This replaces many expensive CPU SA iterations.
+    """
+    device = _learning_device()
+    if device.type == "cpu" and num_steps > 100:
+        num_steps = 100  # limit CPU iterations
+
+    sizes_t = torch.tensor(sizes_np, dtype=torch.float32, device=device)
+    movable_t = torch.tensor(movable_np, dtype=torch.bool, device=device)
+    fixed_mask = ~movable_t
+    half_w = sizes_t[:, 0] / 2
+    half_h = sizes_t[:, 1] / 2
+
+    net_batches = _build_net_tensors(nets_raw, device)
+    if not net_batches:
+        return pos_np
+
+    base_pos = torch.tensor(pos_np, dtype=torch.float32, device=device)
+    anchor_pos = base_pos.clone()
+
+    # Extract plc grid parameters
+    grid_col = getattr(plc, 'grid_col', 10) if plc else 10
+    grid_row = getattr(plc, 'grid_row', 10) if plc else 10
+    hroutes = getattr(plc, 'hroutes_per_micron', 1.0) if plc else 1.0
+    vroutes = getattr(plc, 'vroutes_per_micron', 1.0) if plc else 1.0
+    halloc = getattr(plc, 'hrouting_alloc', 0.0) if plc else 0.0
+    valloc = getattr(plc, 'vrouting_alloc', 0.0) if plc else 0.0
+    rudy_kwargs = dict(
+        net_batches=net_batches, cw=cw, ch=ch,
+        grid_col=grid_col, grid_row=grid_row,
+        hroutes_per_micron=hroutes, vroutes_per_micron=vroutes,
+        hrouting_alloc=halloc, vrouting_alloc=valloc,
+    )
+
+    total_macro_area = (sizes_t[:, 0] * sizes_t[:, 1]).sum().item()
+    target_util = min(total_macro_area / (cw * ch) * 1.2, 0.85)
+
+    pos = base_pos.clone().detach().requires_grad_(True)
+    optimizer = torch.optim.Adam([pos], lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_steps, eta_min=lr * 0.01)
+
+    best_pos = base_pos.clone()
+    best_loss = float("inf")
+
+    for step in range(num_steps):
+        frac = step / num_steps
+        optimizer.zero_grad()
+
+        with torch.no_grad():
+            pos.data[fixed_mask] = anchor_pos[fixed_mask]
+
+        clamped_pos = torch.stack([
+            pos[:, 0].clamp(half_w, cw - half_w),
+            pos[:, 1].clamp(half_h, ch - half_h),
+        ], dim=1)
+
+        loss_wl = _lse_hpwl(clamped_pos, net_batches, gamma=gamma)
+        loss_den = _smooth_density_penalty(
+            clamped_pos, sizes_t, cw, ch,
+            grid_col=grid_col, grid_row=grid_row,
+            target_util=target_util,
+        ) * (cw * ch) * (0.02 + 0.08 * frac)
+        loss_ov = _smooth_overlap_penalty(clamped_pos, sizes_t, movable_t) * (0.5 + 5.0 * frac)
+        loss_cong = _rudy_congestion_proxy(clamped_pos, sizes_t, **rudy_kwargs) * (0.3 + 0.7 * frac)
+        # Anchor penalty to stay close to legalized position
+        anchor_w = 0.005 * (1.0 - 0.8 * frac)  # decay anchor over time
+        loss_anchor = anchor_w * ((clamped_pos[movable_t] - anchor_pos[movable_t]) ** 2).sum()
+
+        loss = loss_wl + loss_den + loss_ov + loss_cong + loss_anchor
+        loss.backward()
+
+        if fixed_mask.any():
+            pos.grad[fixed_mask] = 0
+
+        torch.nn.utils.clip_grad_norm_([pos], 5.0)
+        optimizer.step()
+        scheduler.step()
+
+        with torch.no_grad():
+            pos.data[:, 0].clamp_(half_w, cw - half_w)
+            pos.data[:, 1].clamp_(half_h, ch - half_h)
+            pos.data[fixed_mask] = anchor_pos[fixed_mask]
+
+            # Track best by proxy-aligned cost
+            ov = _smooth_overlap_penalty(clamped_pos, sizes_t, movable_t).item()
+            if ov < 1.0:
+                cost = loss_wl.item() + 0.5 * loss_den.item() / max((cw * ch) * (0.02 + 0.08 * frac), 1e-10) + 0.5 * loss_cong.item() / max(0.3 + 0.7 * frac, 1e-10)
+                if cost < best_loss:
+                    best_loss = cost
+                    best_pos = pos.data.clone()
+
+    refined = best_pos.detach().cpu().numpy().astype(np.float64)
+
+    # Re-legalize
+    sep_x = (sizes_np[:, 0:1] + sizes_np[:, 0:1].T) / 2
+    sep_y = (sizes_np[:, 1:2] + sizes_np[:, 1:2].T) / 2
+    refined = _legalize(
+        refined, movable_np, sizes_np, sizes_np[:, 0] / 2, sizes_np[:, 1] / 2,
+        cw, ch, n_hard, sep_x, sep_y,
+    )
+
+    # Keep only if proxy improves
+    if plc is not None:
+        try:
+            from macro_place.objective import compute_proxy_cost
+            full_old = benchmark.macro_positions.clone()
+            full_old[:n_hard] = torch.tensor(pos_np, dtype=torch.float32)
+            old_proxy = float(compute_proxy_cost(full_old, benchmark, plc)["proxy_cost"])
+
+            full_new = benchmark.macro_positions.clone()
+            full_new[:n_hard] = torch.tensor(refined, dtype=torch.float32)
+            new_proxy = float(compute_proxy_cost(full_new, benchmark, plc)["proxy_cost"])
+
+            if new_proxy <= old_proxy:
+                return refined
+        except Exception:
+            pass
+
+    return pos_np
+
+
 class LearningPlacer(BasePlacer):
     """
     GNN-guided differentiable macro placer with pre-training and SA polish.
 
-    Phase 1: Load pre-trained GNN, fine-tune on this benchmark.
-    Phase 2: Gradient-based refinement with LSE-HPWL + density + overlap.
-    Phase 3: Legalization.
-    Phase 4: SA polish with density-aware cost.
+    Phase 1: Load pre-trained GNN, fine-tune on this benchmark (GPU).
+    Phase 2: Gradient-based refinement with LSE-HPWL + density + overlap (GPU).
+    Phase 3: Legalization (CPU).
+    Phase 3b: GPU-accelerated post-legalization refinement (GPU).
+    Phase 4: SA polish with density-aware cost (CPU, reduced iterations).
     Phase 5: Greedy macro flipping.
     """
 
@@ -700,9 +835,10 @@ class LearningPlacer(BasePlacer):
                  refine_lr: float = 3.0,
                  gamma_start: float = 50.0,
                  gamma_end: float = 2.0,
-                 sa_iters: int = 600_000,
+                 sa_iters: int = 400_000,
                  num_starts: int = 2,
-                 weights_path: str = None):
+                 weights_path: str = None,
+                 gpu_post_legal_steps: int = 300):
         self.seed = seed
         self.gnn_finetune_epochs = gnn_finetune_epochs
         self.refine_epochs = refine_epochs
@@ -713,6 +849,7 @@ class LearningPlacer(BasePlacer):
         self.sa_iters = sa_iters
         self.num_starts = num_starts
         self.weights_path = weights_path or str(WEIGHTS_DIR / "gnn_pretrained.pt")
+        self.gpu_post_legal_steps = gpu_post_legal_steps
 
     def _load_pretrained(self, in_dim: int) -> NetlistGNN:
         """Load pre-trained GNN weights if available."""
@@ -961,6 +1098,14 @@ class LearningPlacer(BasePlacer):
             cw, ch, n_hard, sep_x, sep_y,
         )
 
+        # ── Phase 3b: GPU post-legalization refinement ──────────────────
+        if nets_raw and self.gpu_post_legal_steps > 0:
+            legal_pos = _gpu_post_legalization_refine(
+                legal_pos, benchmark, plc, nets_raw, n_hard,
+                sizes_np, movable_np, cw, ch,
+                num_steps=self.gpu_post_legal_steps,
+            )
+
         # ── Phase 4: SA polish with density ─────────────────────────────
         if nets_raw and self.sa_iters > 0:
             # Density weight calibration (same as SA placer)
@@ -1030,6 +1175,14 @@ class LearningPlacer(BasePlacer):
             cw, ch, n_hard, sep_x, sep_y,
         )
 
+        # GPU post-legalization refinement
+        if nets_raw and self.gpu_post_legal_steps > 0:
+            legal_pos = _gpu_post_legalization_refine(
+                legal_pos, benchmark, plc, nets_raw, n_hard,
+                sizes_np, movable_np, cw, ch,
+                num_steps=self.gpu_post_legal_steps,
+            )
+
         # SA polish with more iterations (use full budget since no GNN time)
         if nets_raw and self.sa_iters > 0:
             grid_col = getattr(plc, 'grid_col', 0) if plc else 0
@@ -1084,8 +1237,7 @@ class LearningPlacer(BasePlacer):
         else:
             nets_raw, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        device = torch.device("cpu")
-        net_batches = _build_net_tensors(nets_raw, device)
+        net_batches = _build_net_tensors(nets_raw, torch.device("cpu"))
 
         node_features, adj_norm, sizes, orig_pos, fixed_mask = _build_features(
             benchmark, plc, nets_raw, n_hard, cw, ch
