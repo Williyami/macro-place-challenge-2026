@@ -16,6 +16,19 @@ PLACER_METHOD=learning uv run evaluate submissions/placer.py --all --no-media
 # Available methods: sa, analytical, hybrid, learning, will_seed, sa_v2
 ```
 
+## Git Hygiene
+
+Run this once after cloning to make local pull/rebase operations safer and to block pushes from a dirty tree:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/setup_git_worktree_safety.ps1
+```
+
+This configures local git settings only for this repository:
+- enables `rebase.autoStash` and `merge.autoStash`
+- enables `rerere` to remember conflict resolutions
+- points `core.hooksPath` at the repo-managed `.githooks/`
+
 ## After Running Benchmarks
 
 Every time you run the full IBM benchmark suite (`--all`), you MUST do all three of these steps.
