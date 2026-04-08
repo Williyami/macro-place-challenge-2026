@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:github.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(uv run:*)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(uv pip:*)",
+      "Bash(uv sync:*)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }

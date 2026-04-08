@@ -1,23 +1,34 @@
 """
-Hybrid Placer v6 — Multi-candidate analytical → SA → GPU refine → Greedy refine.
+Hybrid Placer v8 — Multi-candidate analytical → pre-SA GPU smooth → SA → GPU refine
+                   → Greedy refine → flip → GPU polish → fine greedy → micro GPU polish.
 
-Improvements over v5 (avg 1.5723):
-  - 5 analytical candidates (up from 3) with wider diversity including
-    congestion-heavy and wirelength-focused configs
-  - GPU post-refinement with congestion loss (200 Adam steps)
-  - Evaluator-guided greedy coordinate descent: tries small perturbations
-    per macro and accepts if actual proxy cost (WL+density+congestion) improves
-  - Soft macro recentering at connected-pin centroids
+Improvements over v7 (avg 1.4828):
+  - Pre-SA GPU smoothing (100 steps): removes legalization artifacts before SA starts,
+    giving SA a cleaner starting point
+  - Post-first-greedy flip: a second _greedy_flip after the main greedy passes catches
+    new optimal orientations that greedy position shifts may have unlocked
+  - Second greedy cycle with fine scales (0.001–0.05): 3 passes after GPU polish to
+    capture sub-pixel improvements the coarser first pass (0.004–0.12) missed
+  - Final micro GPU polish (100 steps, lr=0.02, tight anchor=0.1): smooths remaining
+    interaction artifacts from the second greedy cycle
 
 Strategy:
-  1. Analytical phase: 5 candidates × 2000 Adam steps with gamma annealing,
+  1. Analytical phase: 7 candidates × 2500 Adam steps with gamma annealing,
      quadratic init, cosine LR, HPWL + density + congestion + repulsion + overlap.
   2. Legalization: Minimum-displacement snap to resolve overlaps.
-  3. SA phase: HPWL + density co-optimization with reheating (300K iters).
-  4. Greedy flip: Try mirror orientations for each macro to reduce HPWL.
-  5. GPU refine: Short differentiable pass with congestion-aware loss.
-  6. Greedy refine: Evaluator-in-the-loop coordinate descent (3 passes).
-  7. Soft recenter: Move soft macros to weighted pin centroids.
+  3. Pre-SA GPU smoothing: 100-step differentiable pass (tight anchor) to remove
+     legalization displacement artifacts before SA.
+  4. SA phase: HPWL + density co-optimization with reheating (300K iters).
+  5. Greedy flip: Try mirror orientations for each macro to reduce HPWL.
+  6. GPU refine: Cosine-scheduled differentiable pass with congestion-aware loss (500 steps).
+  7. Greedy refine: Connectivity-sorted evaluator-guided coordinate descent (5 passes,
+     scales 0.004–0.12).
+  8. Post-greedy flip: Second orientation flip after greedy has repositioned macros.
+  9. GPU polish: Short differentiable pass after greedy to remove interaction artifacts
+     (200 steps, lr=0.04).
+  10. Fine greedy: 3-pass coordinate descent with fine scales (0.001–0.05).
+  11. Micro GPU polish: 100-step tight-anchor polish after fine greedy.
+  12. Soft recenter: Move soft macros to weighted pin centroids.
 
 Usage:
     uv run evaluate submissions/hybrid_placer.py
@@ -592,6 +603,9 @@ def _gpu_post_refine(
     pos = base_pos.clone().detach().requires_grad_(True)
     fixed_pos = base_pos.clone()
     optimizer = torch.optim.Adam([pos], lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_steps, eta_min=lr * 0.05,
+    )
 
     best_pos = base_pos.clone()
     best_cost = float("inf")
@@ -620,6 +634,7 @@ def _gpu_post_refine(
             torch.nn.utils.clip_grad_norm_([pos], max_norm=max(cw, ch))
 
         optimizer.step()
+        scheduler.step()
 
         with torch.no_grad():
             pos.data[:, 0] = torch.clamp(pos.data[:, 0], half_w, cw - half_w)
@@ -1157,8 +1172,9 @@ def _greedy_refine_proxy(
     sep_y: np.ndarray,
     cw: float,
     ch: float,
-    max_passes: int = 3,
-    scales: tuple = (0.01, 0.03, 0.06),
+    max_passes: int = 5,
+    scales: tuple = (0.004, 0.012, 0.03, 0.065, 0.12),
+    connectivity_weights: np.ndarray | None = None,
 ):
     """
     Greedy coordinate descent using the actual proxy evaluator.
@@ -1166,6 +1182,9 @@ def _greedy_refine_proxy(
     For each movable macro, tries small perturbations in 8 directions at
     multiple scales.  Accepts the position that gives the lowest *real*
     proxy cost (WL + 0.5*density + 0.5*congestion).
+
+    Macros are processed highest-connectivity-first so that the most
+    impactful moves happen early in each pass, improving subsequent evals.
 
     This directly optimises the target metric, closing the gap that SA
     (which only tracks HPWL + density) leaves on the table — especially
@@ -1181,10 +1200,22 @@ def _greedy_refine_proxy(
         (1, 1), (1, -1), (-1, 1), (-1, -1),
     ]
 
+    movable_idx = np.where(movable)[0].copy()
+    # Sort by connectivity descending — high-degree macros have most impact per eval
+    if connectivity_weights is not None:
+        conn_order = np.argsort(-connectivity_weights[movable_idx])
+        movable_idx_sorted = movable_idx[conn_order]
+    else:
+        movable_idx_sorted = movable_idx
+
     for pass_num in range(max_passes):
         improved = False
-        macro_order = np.where(movable)[0].copy()
-        np.random.shuffle(macro_order)
+        # Alternate: connectivity order on even passes, shuffled on odd passes
+        if pass_num % 2 == 0:
+            macro_order = movable_idx_sorted
+        else:
+            macro_order = movable_idx.copy()
+            np.random.shuffle(macro_order)
 
         for i in macro_order:
             old_x, old_y = best_pos[i, 0], best_pos[i, 1]
@@ -1288,25 +1319,39 @@ def _recenter_soft_macros(pos_hard: np.ndarray, benchmark, plc):
 
 class HybridPlacer(BasePlacer):
     """
-    Hybrid placer v6: multi-candidate analytical → SA → GPU refine → greedy → flip.
+    Hybrid placer v8: multi-candidate analytical → pre-SA GPU smooth → SA →
+      GPU refine → greedy → flip → GPU polish → fine greedy → micro GPU polish.
 
-    Phase 1 (analytical): 2000 Adam steps × 5 diverse candidates with gamma
-      annealing, cosine LR, quadratic init, congestion + density + repulsion.
-    Phase 2 (legalize): Minimum-displacement overlap resolution.
-    Phase 3 (SA): 300K iterations with HPWL + density co-optimization + reheating.
-    Phase 4 (flip): Greedy pin orientation flipping for HPWL reduction.
-    Phase 5 (GPU refine): Short differentiable pass with congestion loss.
-    Phase 6 (greedy refine): Evaluator-guided coordinate descent — tries small
-      perturbations per macro, accepts if actual proxy cost improves.
-    Phase 7 (soft recenter): Recenters soft macros at connected-pin centroids.
+    Phase 1  (analytical): 7 diverse candidates × 2500 Adam steps.
+    Phase 2  (legalize): Minimum-displacement overlap resolution.
+    Phase 3  (pre-SA GPU smooth): 100-step tight-anchor GPU pass to remove legalization
+               displacement artifacts before SA.
+    Phase 4  (SA): 300K iterations with HPWL + density co-optimization + reheating.
+    Phase 5  (flip): Greedy pin orientation flipping for HPWL reduction.
+    Phase 6  (GPU refine): Cosine-scheduled differentiable pass with congestion loss (500 steps).
+    Phase 7  (greedy refine): Connectivity-sorted evaluator-guided coordinate descent
+               (5 passes, scales 0.004–0.12).
+    Phase 8  (post-greedy flip): Second orientation flip after greedy repositioning.
+    Phase 9  (GPU polish): Short differentiable pass after greedy (200 steps, lr=0.04).
+    Phase 10 (fine greedy): 3-pass coordinate descent with fine scales (0.001–0.05).
+    Phase 11 (micro GPU polish): 100-step tight-anchor polish after fine greedy.
+    Phase 12 (soft recenter): Move soft macros to weighted pin centroids.
+
+    v8 changes vs v7 (avg 1.4828):
+      - Pre-SA GPU smoothing (100 steps, tight anchor) to remove legalization artifacts
+      - Post-first-greedy flip: second orientation flip after greedy repositioning
+      - Fine greedy: 3 passes at scales (0.001, 0.003, 0.008, 0.02, 0.05) after GPU polish
+      - Micro GPU polish: 100-step low-LR tight-anchor pass after fine greedy
     """
 
     def __init__(
         self,
         seed: int = 42,
         # Analytical phase
-        analytical_steps: int = 2000,
-        analytical_candidates: int = 5,
+        analytical_steps: int = 2500,
+        analytical_candidates: int = 7,
+        # Pre-SA GPU smoothing (removes legalization artifacts)
+        pre_sa_smoothing_steps: int = 100,
         # SA phase
         sa_iters: int = 300_000,
         sa_t_start: float = 0.15,
@@ -1314,9 +1359,13 @@ class HybridPlacer(BasePlacer):
         reheat_threshold: int = 10_000,
         reheat_factor: float = 3.0,
         sa_density_boost: float = 1.0,
-        post_refine_steps: int = 200,
+        post_refine_steps: int = 500,
+        post_greedy_polish_steps: int = 200,
         # Greedy refinement
-        greedy_passes: int = 3,
+        greedy_passes: int = 5,
+        # Fine greedy (second cycle, small scales) + micro polish
+        second_greedy_passes: int = 3,
+        second_greedy_polish_steps: int = 100,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
@@ -1327,6 +1376,7 @@ class HybridPlacer(BasePlacer):
         self.seed = seed
         self.analytical_steps = analytical_steps
         self.analytical_candidates = analytical_candidates
+        self.pre_sa_smoothing_steps = pre_sa_smoothing_steps
         self.sa_iters = sa_iters
         self.sa_t_start = sa_t_start
         self.sa_t_end = sa_t_end
@@ -1334,7 +1384,10 @@ class HybridPlacer(BasePlacer):
         self.reheat_factor = reheat_factor
         self.sa_density_boost = sa_density_boost
         self.post_refine_steps = post_refine_steps
+        self.post_greedy_polish_steps = post_greedy_polish_steps
         self.greedy_passes = greedy_passes
+        self.second_greedy_passes = second_greedy_passes
+        self.second_greedy_polish_steps = second_greedy_polish_steps
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
@@ -1375,19 +1428,32 @@ class HybridPlacer(BasePlacer):
             candidate_configs = [
                 # Balanced (original best)
                 dict(density_weight=0.006, congestion_weight=0.001,
-                     repulsion_weight=0.6, halo_area=0.12, halo_base=0.04),
+                     repulsion_weight=0.6, halo_area=0.12, halo_base=0.04,
+                     gamma_start=40.0, gamma_end=3.0),
                 # High density + congestion pressure (spread macros aggressively)
                 dict(density_weight=0.012, congestion_weight=0.002,
-                     repulsion_weight=1.0, halo_area=0.16, halo_base=0.05),
+                     repulsion_weight=1.0, halo_area=0.16, halo_base=0.05,
+                     gamma_start=40.0, gamma_end=3.0),
                 # Low pressure (trust HPWL, minimal spreading)
                 dict(density_weight=0.004, congestion_weight=0.0008,
-                     repulsion_weight=0.3, halo_area=0.08, halo_base=0.03),
-                # Congestion-heavy (push hard on routing demand reduction)
+                     repulsion_weight=0.3, halo_area=0.08, halo_base=0.03,
+                     gamma_start=40.0, gamma_end=3.0),
+                # Congestion-heavy + gentle gamma (less aggressive local pinning)
                 dict(density_weight=0.008, congestion_weight=0.005,
-                     repulsion_weight=0.8, halo_area=0.20, halo_base=0.06),
-                # Wirelength-focused (minimal penalties, tight packing)
+                     repulsion_weight=0.8, halo_area=0.20, halo_base=0.06,
+                     gamma_start=20.0, gamma_end=4.0),
+                # Wirelength-focused + aggressive gamma (tight local optimum)
                 dict(density_weight=0.002, congestion_weight=0.0004,
-                     repulsion_weight=0.15, halo_area=0.05, halo_base=0.02),
+                     repulsion_weight=0.15, halo_area=0.05, halo_base=0.02,
+                     gamma_start=60.0, gamma_end=2.0),
+                # Medium density + very gentle gamma (smooth global landscape)
+                dict(density_weight=0.005, congestion_weight=0.0015,
+                     repulsion_weight=0.5, halo_area=0.10, halo_base=0.035,
+                     gamma_start=15.0, gamma_end=5.0),
+                # High repulsion + mid gamma (maximally spread initial solution)
+                dict(density_weight=0.010, congestion_weight=0.003,
+                     repulsion_weight=1.5, halo_area=0.18, halo_base=0.055,
+                     gamma_start=30.0, gamma_end=3.0),
             ][:max(1, self.analytical_candidates)]
 
             best_init_score = float("inf")
@@ -1398,8 +1464,8 @@ class HybridPlacer(BasePlacer):
                     benchmark, plc, nets,
                     num_steps=self.analytical_steps,
                     lr=4.0,
-                    gamma_start=40.0,
-                    gamma_end=3.0,
+                    gamma_start=cfg.get("gamma_start", 40.0),
+                    gamma_end=cfg.get("gamma_end", 3.0),
                     density_weight=cfg["density_weight"],
                     congestion_weight=cfg["congestion_weight"],
                     repulsion_weight=cfg["repulsion_weight"],
@@ -1421,6 +1487,24 @@ class HybridPlacer(BasePlacer):
 
         # ── Phase 2: Legalize ──────────────────────────────────────────────
         pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+
+        # ── Phase 3: Pre-SA GPU smoothing ─────────────────────────────────
+        # Remove legalization displacement artifacts before SA for a cleaner start.
+        if plc is not None and self.pre_sa_smoothing_steps > 0:
+            pre_smooth_pos = pos.copy()
+            smoothed = _gpu_post_refine(
+                benchmark, plc, pos,
+                num_steps=self.pre_sa_smoothing_steps,
+                lr=0.02,
+                anchor_weight=0.05,
+                seed=self.seed,
+            )
+            smoothed = _legalize(smoothed, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+            try:
+                if _proxy_score_pos(benchmark, plc, smoothed) <= _proxy_score_pos(benchmark, plc, pre_smooth_pos):
+                    pos = smoothed
+            except Exception:
+                pass
 
         def capture_snapshot(pos_hard: np.ndarray):
             if not self.capture_snapshots:
@@ -1506,13 +1590,78 @@ class HybridPlacer(BasePlacer):
             except Exception:
                 pos = sa_pos
 
+        # ── Compute per-macro connectivity weights (used in both greedy rounds) ─
+        conn_weights = np.zeros(n_hard)
+        for net in nets:
+            w = net["weight"]
+            for idx in net["hard_idx"]:
+                conn_weights[idx] += w
+
         # ── Evaluator-guided greedy refinement ─────────────────────────────
         if plc is not None and self.greedy_passes > 0:
             pos = _greedy_refine_proxy(
                 pos, benchmark, plc, movable, sizes,
                 half_w, half_h, sep_x, sep_y, cw, ch,
                 max_passes=self.greedy_passes,
+                connectivity_weights=conn_weights,
             )
+
+        # ── Post-greedy flip (second orientation pass after greedy repositioning) ─
+        # Greedy shifts may unlock different optimal orientations.
+        if nets and plc is not None:
+            _greedy_flip(pos, nets, macro_to_nets, movable, plc)
+
+        # ── Post-greedy GPU polish ──────────────────────────────────────────
+        # Short differentiable pass to smooth any interaction effects from greedy
+        if plc is not None and self.post_greedy_polish_steps > 0:
+            pre_polish = pos.copy()
+            polished_pos = _gpu_post_refine(
+                benchmark,
+                plc,
+                pos,
+                num_steps=self.post_greedy_polish_steps,
+                lr=0.04,
+                anchor_weight=0.05,
+                seed=self.seed,
+            )
+            polished_pos = _legalize(polished_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+            try:
+                if _proxy_score_pos(benchmark, plc, polished_pos) <= _proxy_score_pos(benchmark, plc, pre_polish):
+                    pos = polished_pos
+            except Exception:
+                pass
+
+        # ── Fine greedy (second cycle, small scales) ────────────────────────
+        # After GPU polish, positions have shifted slightly; fine-scale greedy
+        # captures sub-pixel improvements the coarser first pass missed.
+        if plc is not None and self.second_greedy_passes > 0:
+            pos = _greedy_refine_proxy(
+                pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                max_passes=self.second_greedy_passes,
+                scales=(0.001, 0.003, 0.008, 0.02, 0.05),
+                connectivity_weights=conn_weights,
+            )
+
+        # ── Micro GPU polish (tight anchor, after fine greedy) ──────────────
+        # Very short differentiable pass to smooth fine-greedy interaction effects.
+        if plc is not None and self.second_greedy_polish_steps > 0:
+            pre_micro = pos.copy()
+            micro_polished = _gpu_post_refine(
+                benchmark,
+                plc,
+                pos,
+                num_steps=self.second_greedy_polish_steps,
+                lr=0.02,
+                anchor_weight=0.1,
+                seed=self.seed,
+            )
+            micro_polished = _legalize(micro_polished, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+            try:
+                if _proxy_score_pos(benchmark, plc, micro_polished) <= _proxy_score_pos(benchmark, plc, pre_micro):
+                    pos = micro_polished
+            except Exception:
+                pass
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
