@@ -16,8 +16,8 @@ Generated from the note files in this directory.
 | S2 | SA Placer | 2026-04-04 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4850 | 1.4850 | 999.38 | (SA + Analytical method) Omnellnotes.md |
 | S3 | SA Placer | 2026-04-04, v2 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4803 | 1.4803 | 676.83 | (SA + Analytical method) Omnellnotes.md |
 | S4 | SA Placer | 2026-04-05 | SA Placer (PLACER_METHOD=sa) | full_suite | 17 | 1.4844 | 1.4844 | 503.00 | (SA + Analytical method) Omnellnotes.md |
-| S5 | SA Placer | 2026-04-05 | SA Placer (full_suite) â€” S5 | full_suite | 17 | 1.4836 | 1.4836 | - | (SA + Analytical method) Omnellnotes.md |
-| S6 | SA Placer | 2026-04-05 | SA Placer (full_suite) â€” S6 | full_suite | 17 | 1.4814 | 1.4814 | - | (SA + Analytical method) Omnellnotes.md |
+| S5 | SA Placer | 2026-04-05 | SA Placer (full_suite) — S5 | full_suite | 17 | 1.4836 | 1.4836 | - | (SA + Analytical method) Omnellnotes.md |
+| S6 | SA Placer | 2026-04-05 | SA Placer (full_suite) — S6 | full_suite | 17 | 1.4814 | 1.4814 | - | (SA + Analytical method) Omnellnotes.md |
 | A1 | Analytical Placer | 2026-04-03 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7310 | 1.7310 | 406.00 | (SA + Analytical method) Omnellnotes.md |
 | A2 | Analytical Placer | 2026-04-04 | Analytical Placer (PLACER_METHOD=analytical) | full_suite | 17 | 1.7394 | 1.7394 | 598.68 | (SA + Analytical method) Omnellnotes.md |
 | A3 | Analytical Placer | 2026-04-05 | Analytical Placer v3 (PLACER_METHOD=analytical) | full_suite | 17 | 1.7232 | 1.7232 | 1362.00 | (SA + Analytical method) Omnellnotes.md |
@@ -28,6 +28,7 @@ Generated from the note files in this directory.
 | H5 | HybridPlacer | 2026-04-07, v5 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.5723 | 1.5723 | 24641.71 | (Hybrid method)novaknotes.md |
 | H6 | HybridPlacer | 2026-04-08, v6 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.4828 | 1.4828 | 797.87 | (Hybrid method)novaknotes.md |
 | H7 | HybridPlacer | 2026-04-08, v7 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.4828 | 1.4828 | 797.56 | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | 2026-04-08, v8 | Analytical -> SA pipeline benchmark run | full_suite | 17 | 1.4827 | 1.4827 | 1829.28 | (Hybrid method)novaknotes.md |
 | V1 | SA V2 (Eklund) | 2026-04-06 | SA V2: GPU-assisted post-refinement with CPU fallback | full_suite | 17 | 1.5697 | 1.5697 | 3478.35 | (RL method)eklundnotes.md |
 | V2 | SA V2 (Eklund) | 2026-04-07 | SA V2: fast full-suite rerun (`--no-media`) | full_suite | 17 | 1.5738 | 1.5738 | 668.95 | (RL method)eklundnotes.md |
 
@@ -409,6 +410,23 @@ Generated from the note files in this directory.
 | H7 | HybridPlacer | ibm16 | 1.5277 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H7 | HybridPlacer | ibm17 | 1.7493 | - | - | - | - | (Hybrid method)novaknotes.md |
 | H7 | HybridPlacer | ibm18 | 1.7871 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm01 | 1.1167 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm02 | 1.5970 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm03 | 1.3886 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm04 | 1.3923 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm06 | 1.6923 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm07 | 1.4864 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm08 | 1.5223 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm09 | 1.1027 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm10 | 1.3697 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm11 | 1.2315 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm12 | 1.6441 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm13 | 1.3895 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm14 | 1.6145 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm15 | 1.5939 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm16 | 1.5277 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm17 | 1.7493 | - | - | - | - | (Hybrid method)novaknotes.md |
+| H8 | HybridPlacer | ibm18 | 1.7871 | - | - | - | - | (Hybrid method)novaknotes.md |
 | V1 | SA V2 (Eklund) | ibm01 | 1.2564 | 0.088 | 0.927 | 1.410 | 80.75 | (RL method)eklundnotes.md |
 | V1 | SA V2 (Eklund) | ibm02 | 1.6908 | 0.085 | 0.783 | 2.429 | 77.08 | (RL method)eklundnotes.md |
 | V1 | SA V2 (Eklund) | ibm03 | 1.4712 | 0.086 | 0.829 | 1.940 | 62.24 | (RL method)eklundnotes.md |

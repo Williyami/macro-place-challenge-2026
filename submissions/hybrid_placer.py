@@ -71,6 +71,7 @@ from submissions.sa_placer import (
     _build_density_grid,
     _density_cost_from_grid,
     _macro_cell_overlaps,
+    _proxy_local_search,
 )
 
 
@@ -1175,6 +1176,7 @@ def _greedy_refine_proxy(
     max_passes: int = 5,
     scales: tuple = (0.004, 0.012, 0.03, 0.065, 0.12),
     connectivity_weights: np.ndarray | None = None,
+    macro_pull_targets: np.ndarray | None = None,
 ):
     """
     Greedy coordinate descent using the actual proxy evaluator.
@@ -1221,6 +1223,7 @@ def _greedy_refine_proxy(
             old_x, old_y = best_pos[i, 0], best_pos[i, 1]
             best_local_score = best_score
             best_local_x, best_local_y = old_x, old_y
+            candidate_positions = []
 
             for scale in scales:
                 dx = cw * scale
@@ -1228,29 +1231,49 @@ def _greedy_refine_proxy(
                 for ax, ay in directions:
                     new_x = float(np.clip(old_x + ax * dx, half_w[i], cw - half_w[i]))
                     new_y = float(np.clip(old_y + ay * dy, half_h[i], ch - half_h[i]))
+                    if new_x != old_x or new_y != old_y:
+                        candidate_positions.append((new_x, new_y))
 
-                    if new_x == old_x and new_y == old_y:
-                        continue
+            if macro_pull_targets is not None:
+                tx, ty = macro_pull_targets[i]
+                for alpha in (0.35, 0.65, 1.0):
+                    new_x = float(np.clip(old_x + alpha * (tx - old_x), half_w[i], cw - half_w[i]))
+                    new_y = float(np.clip(old_y + alpha * (ty - old_y), half_h[i], ch - half_h[i]))
+                    if new_x != old_x or new_y != old_y:
+                        candidate_positions.append((new_x, new_y))
+                    if new_x != old_x:
+                        candidate_positions.append((new_x, old_y))
+                    if new_y != old_y:
+                        candidate_positions.append((old_x, new_y))
 
-                    # Quick overlap check
-                    best_pos[i, 0] = new_x
-                    best_pos[i, 1] = new_y
-                    ddx = np.abs(best_pos[i, 0] - best_pos[:, 0])
-                    ddy = np.abs(best_pos[i, 1] - best_pos[:, 1])
-                    ov = (ddx < sep_x[i] + GAP) & (ddy < sep_y[i] + GAP)
-                    ov[i] = False
-                    if ov.any():
-                        best_pos[i, 0] = old_x
-                        best_pos[i, 1] = old_y
-                        continue
+            seen = set()
+            deduped_positions = []
+            for cand_x, cand_y in candidate_positions:
+                key = (round(cand_x, 6), round(cand_y, 6))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_positions.append((cand_x, cand_y))
 
-                    score = _proxy_score_pos(benchmark, plc, best_pos)
-                    if score < best_local_score:
-                        best_local_score = score
-                        best_local_x, best_local_y = new_x, new_y
-
+            for new_x, new_y in deduped_positions:
+                best_pos[i, 0] = new_x
+                best_pos[i, 1] = new_y
+                ddx = np.abs(best_pos[i, 0] - best_pos[:, 0])
+                ddy = np.abs(best_pos[i, 1] - best_pos[:, 1])
+                ov = (ddx < sep_x[i] + GAP) & (ddy < sep_y[i] + GAP)
+                ov[i] = False
+                if ov.any():
                     best_pos[i, 0] = old_x
                     best_pos[i, 1] = old_y
+                    continue
+
+                score = _proxy_score_pos(benchmark, plc, best_pos)
+                if score < best_local_score:
+                    best_local_score = score
+                    best_local_x, best_local_y = new_x, new_y
+
+                best_pos[i, 0] = old_x
+                best_pos[i, 1] = old_y
 
             if best_local_score < best_score - 1e-6:
                 best_pos[i, 0] = best_local_x
@@ -1258,10 +1281,82 @@ def _greedy_refine_proxy(
                 best_score = best_local_score
                 improved = True
 
+                refine_dx = max(abs(best_local_x - old_x) * 0.5, cw * 0.001)
+                refine_dy = max(abs(best_local_y - old_y) * 0.5, ch * 0.001)
+                for ax, ay in directions:
+                    cand_x = float(np.clip(best_local_x + ax * refine_dx, half_w[i], cw - half_w[i]))
+                    cand_y = float(np.clip(best_local_y + ay * refine_dy, half_h[i], ch - half_h[i]))
+                    if cand_x == best_pos[i, 0] and cand_y == best_pos[i, 1]:
+                        continue
+                    best_pos[i, 0] = cand_x
+                    best_pos[i, 1] = cand_y
+                    ddx = np.abs(best_pos[i, 0] - best_pos[:, 0])
+                    ddy = np.abs(best_pos[i, 1] - best_pos[:, 1])
+                    ov = (ddx < sep_x[i] + GAP) & (ddy < sep_y[i] + GAP)
+                    ov[i] = False
+                    if ov.any():
+                        best_pos[i, 0] = best_local_x
+                        best_pos[i, 1] = best_local_y
+                        continue
+                    score = _proxy_score_pos(benchmark, plc, best_pos)
+                    if score < best_score - 1e-6:
+                        best_score = score
+                        best_local_x, best_local_y = cand_x, cand_y
+                    best_pos[i, 0] = best_local_x
+                    best_pos[i, 1] = best_local_y
+
         if not improved:
             break
 
     return best_pos
+
+
+def _compute_macro_pull_targets(
+    pos: np.ndarray,
+    nets: list[dict],
+    macro_to_nets: list[list[int]],
+    movable: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    cw: float,
+    ch: float,
+) -> np.ndarray:
+    """Weighted connected-pin centroids used to bias greedy search proposals."""
+    n_hard = len(movable)
+    targets = pos.copy()
+    canvas_center = np.array([cw / 2.0, ch / 2.0], dtype=np.float64)
+
+    for i in range(n_hard):
+        if not movable[i]:
+            continue
+        x_sum = 0.0
+        y_sum = 0.0
+        w_sum = 0.0
+        for net_idx in macro_to_nets[i]:
+            net = nets[net_idx]
+            weight = float(net["weight"])
+            for k, j in enumerate(net["hard_idx"]):
+                if j == i:
+                    continue
+                x_sum += weight * (pos[j, 0] + net["hard_ox"][k])
+                y_sum += weight * (pos[j, 1] + net["hard_oy"][k])
+                w_sum += weight
+            if net["fxmin"] != float("inf"):
+                fx = 0.5 * (net["fxmin"] + net["fxmax"])
+                fy = 0.5 * (net["fymin"] + net["fymax"])
+                x_sum += weight * fx
+                y_sum += weight * fy
+                w_sum += weight
+
+        if w_sum <= 1e-9:
+            tx, ty = canvas_center
+        else:
+            tx = x_sum / w_sum
+            ty = y_sum / w_sum
+        targets[i, 0] = float(np.clip(tx, half_w[i], cw - half_w[i]))
+        targets[i, 1] = float(np.clip(ty, half_h[i], ch - half_h[i]))
+
+    return targets
 
 
 # ── Fast soft macro recentering ────────────────────────────────────────────
@@ -1354,6 +1449,7 @@ class HybridPlacer(BasePlacer):
         pre_sa_smoothing_steps: int = 100,
         # SA phase
         sa_iters: int = 300_000,
+        congestion_sa_iters: int = 40_000,
         sa_t_start: float = 0.15,
         sa_t_end: float = 0.001,
         reheat_threshold: int = 10_000,
@@ -1378,6 +1474,7 @@ class HybridPlacer(BasePlacer):
         self.analytical_candidates = analytical_candidates
         self.pre_sa_smoothing_steps = pre_sa_smoothing_steps
         self.sa_iters = sa_iters
+        self.congestion_sa_iters = congestion_sa_iters
         self.sa_t_start = sa_t_start
         self.sa_t_end = sa_t_end
         self.reheat_threshold = reheat_threshold
@@ -1567,9 +1664,39 @@ class HybridPlacer(BasePlacer):
                 benchmark=benchmark,
             )
 
-        # ── Greedy pin flipping (free HPWL improvement) ───────────────────
+        # ── Short congestion-focused SA cleanup ────────────────────────────
+        if plc is not None and nets and self.congestion_sa_iters > 0:
+            try:
+                vroutes_per_micron = float(getattr(plc, "vroutes_per_micron", getattr(benchmark, "vroutes_per_micron", 0.0)))
+                hroutes_per_micron = float(getattr(plc, "hroutes_per_micron", getattr(benchmark, "hroutes_per_micron", 0.0)))
+                vrouting_alloc = float(getattr(plc, "vrouting_alloc", 0.0))
+                hrouting_alloc = float(getattr(plc, "hrouting_alloc", 0.0))
+                smooth_range = int(getattr(plc, "congestion_smooth_range", 0))
+                if grid_col > 0 and grid_row > 0 and vroutes_per_micron > 0 and hroutes_per_micron > 0:
+                    congestion_pos = _sa_refine_congestion(
+                        pos, nets, macro_to_nets, neighbors,
+                        movable, sizes, half_w, half_h, sep_x, sep_y,
+                        cw, ch, self.congestion_sa_iters, self.seed + 17,
+                        grid_row, grid_col, vroutes_per_micron, hroutes_per_micron,
+                        vrouting_alloc, hrouting_alloc, smooth_range,
+                        plc,
+                        congestion_weight=0.35,
+                        t_start_factor=max(self.sa_t_start * 0.45, 0.03),
+                        t_end_factor=max(self.sa_t_end * 0.5, 0.0005),
+                        reheat_threshold=max(2_000, self.reheat_threshold // 2),
+                        reheat_factor=max(1.5, self.reheat_factor - 0.5),
+                    )
+                    congestion_pos = _legalize(
+                        congestion_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y,
+                    )
+                    if _proxy_score_pos(benchmark, plc, congestion_pos) <= _proxy_score_pos(benchmark, plc, pos):
+                        pos = congestion_pos
+            except Exception:
+                pass
+
+        # ── Greedy pin flipping (proxy-aware when benchmark is available) ──
         if nets and plc is not None:
-            _greedy_flip(pos, nets, macro_to_nets, movable, plc)
+            _greedy_flip(pos, nets, macro_to_nets, movable, plc, benchmark=benchmark)
 
         # ── GPU post-refinement (congestion-aware differentiable fine-tune) ─
         if plc is not None and self.post_refine_steps > 0:
@@ -1596,6 +1723,9 @@ class HybridPlacer(BasePlacer):
             w = net["weight"]
             for idx in net["hard_idx"]:
                 conn_weights[idx] += w
+        macro_pull_targets = _compute_macro_pull_targets(
+            pos, nets, macro_to_nets, movable, half_w, half_h, cw, ch,
+        ) if nets else None
 
         # ── Evaluator-guided greedy refinement ─────────────────────────────
         if plc is not None and self.greedy_passes > 0:
@@ -1604,12 +1734,13 @@ class HybridPlacer(BasePlacer):
                 half_w, half_h, sep_x, sep_y, cw, ch,
                 max_passes=self.greedy_passes,
                 connectivity_weights=conn_weights,
+                macro_pull_targets=macro_pull_targets,
             )
 
         # ── Post-greedy flip (second orientation pass after greedy repositioning) ─
         # Greedy shifts may unlock different optimal orientations.
         if nets and plc is not None:
-            _greedy_flip(pos, nets, macro_to_nets, movable, plc)
+            _greedy_flip(pos, nets, macro_to_nets, movable, plc, benchmark=benchmark)
 
         # ── Post-greedy GPU polish ──────────────────────────────────────────
         # Short differentiable pass to smooth any interaction effects from greedy
@@ -1641,6 +1772,7 @@ class HybridPlacer(BasePlacer):
                 max_passes=self.second_greedy_passes,
                 scales=(0.001, 0.003, 0.008, 0.02, 0.05),
                 connectivity_weights=conn_weights,
+                macro_pull_targets=macro_pull_targets,
             )
 
         # ── Micro GPU polish (tight anchor, after fine greedy) ──────────────
@@ -1662,6 +1794,16 @@ class HybridPlacer(BasePlacer):
                     pos = micro_polished
             except Exception:
                 pass
+
+        # ── Final proxy-aware macro shift cleanup ──────────────────────────
+        if plc is not None:
+            pos = _proxy_local_search(
+                pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                max_macros=20,
+                shift_frac=0.02,
+                time_budget=20.0,
+            )
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
