@@ -346,3 +346,54 @@ Changes from previous SA run:
 - **Per-benchmark overrides for ibm06/17/18** (more iters + reheat) — ibm06 regressed +0.017, others unchanged
 
 ### Current best remains: S3 = 1.4803 avg proxy
+
+## 2026-04-07 — SA S6: Post-SA local search with real proxy (30s time budget)
+
+### SA Placer (full_suite) — S6
+
+**Method:** SA with post-SA local search added. After SA + greedy flipping, a time-budgeted (30s) greedy local search shifts the 15 largest macros in 4 cardinal directions, keeping moves that improve actual `compute_proxy_cost` (WL + density + congestion via plc evaluator).
+
+| Benchmark | Proxy  | WL    | Density | Congestion | Time     | vs S3     |
+|-----------|--------|-------|---------|------------|----------|-----------|
+| ibm01     | 1.1138 | 0.069 | 0.822   | 1.286      |  35.47s  | -0.014 ✅ |
+| ibm02     | 1.5983 | 0.076 | 0.727   | 2.315      |  46.75s  | -0.009 ✅ |
+| ibm03     | 1.3893 | 0.079 | 0.769   | 1.849      |  38.91s  | -0.014 ✅ |
+| ibm04     | 1.3811 | 0.072 | 0.779   | 1.839      | 103.13s  | +0.013 ❌ |
+| ibm06     | 1.6887 | 0.063 | 0.764   | 2.481      |  48.28s  | +0.004 ❌ |
+| ibm07     | 1.4894 | 0.065 | 0.808   | 2.040      |  76.26s  | +0.010 ❌ |
+| ibm08     | 1.5220 | 0.070 | 0.840   | 2.066      |  57.35s  | +0.009 ❌ |
+| ibm09     | 1.1022 | 0.058 | 0.819   | 1.269      |  37.50s  | -0.008 ✅ |
+| ibm10     | 1.3719 | 0.065 | 0.707   | 1.904      |  97.83s  | +0.002    |
+| ibm11     | 1.2274 | 0.055 | 0.847   | 1.498      |  68.25s  | -0.003 ✅ |
+| ibm12     | 1.6432 | 0.060 | 0.758   | 2.407      |  83.68s  | -0.003 ✅ |
+| ibm13     | 1.3905 | 0.054 | 0.873   | 1.799      |  66.67s  | -0.005 ✅ |
+| ibm14     | 1.6101 | 0.052 | 0.947   | 2.171      |  77.99s  | +0.009 ❌ |
+| ibm15     | 1.5952 | 0.058 | 0.916   | 2.158      |  65.49s  | -0.001 ✅ |
+| ibm16     | 1.5277 | 0.049 | 0.847   | 2.111      |  88.86s  | +0.004 ❌ |
+| ibm17     | 1.7478 | 0.053 | 0.941   | 2.448      | 128.40s  | -0.002 ✅ |
+| ibm18     | 1.7858 | 0.053 | 1.033   | 2.432      |  74.31s  | -0.001 ✅ |
+| **AVG**   |**1.4814**|     |         |            | 1170s    | **+0.001** |
+
+### Analysis
+- **AVG 1.4814** — very slightly worse than S3 (1.4803) by 0.001
+- Local search improved 10/17 benchmarks, hurt 6, neutral 1
+- Best improvements: ibm01 (-0.014), ibm03 (-0.014), ibm02 (-0.009), ibm09 (-0.008)
+- Worst regressions: ibm04 (+0.013), ibm07 (+0.010), ibm08 (+0.009), ibm14 (+0.009)
+- ibm04 regression expected — multi-start SA already near-optimal, local search introduces noise
+- Runtime ~2x due to 30s local search per benchmark (1170s vs ~680s)
+- **Congestion improved** on many benchmarks (ibm01: 1.296→1.286, ibm06: 2.576→2.481, ibm09: 1.286→1.269)
+- **Mixed results overall** — stochastic SA noise masks local search gains
+
+### Conclusion
+Post-SA local search concept is sound but:
+1. SA stochastic variation (+/-0.01) is same magnitude as local search gains
+2. ibm04 with multi-start consistently hurt by local search
+3. Need to either (a) skip local search for multi-start benchmarks or (b) run SA with fixed seed for fair comparison
+
+### Current best remains: S3 = 1.4803 avg proxy
+
+### Prioritized improvement ideas (Apr 6)
+1. **Post-SA local search with real proxy** — after SA converges, greedy pass trying small shifts per macro, evaluated with actual `compute_proxy_cost` (plc.get_congestion_cost etc). Can't make things worse (only keep improvements). Directly targets congestion without per-iteration overhead.
+2. **Congestion-aware greedy flipping** — switch `_greedy_flip` from HPWL-only to full proxy evaluation (WL + density + congestion). Currently flipping only optimizes wirelength.
+3. **Two-phase SA** — phase 1: current SA (120K iters, HPWL+density). Phase 2: short SA (~5K iters) with very low temperature, using actual `compute_proxy_cost` for acceptance. Expensive per-step but few steps.
+4. **Adaptive shift distribution** — scale shift magnitude by macro size relative to canvas for large benchmarks (ibm17, ibm06).

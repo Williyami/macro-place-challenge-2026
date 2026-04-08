@@ -881,8 +881,11 @@ def _sa_refine(
 
 # ── greedy macro flipping ───────────────────────────────────────────────────
 
-def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
-    """Try flipping each hard macro's pin offsets; keep if HPWL improves.
+def _greedy_flip(pos, nets, macro_to_nets, movable, plc, benchmark=None):
+    """Try flipping each hard macro's pin offsets; keep if proxy improves.
+
+    When benchmark is provided, uses full proxy (WL + density + congestion)
+    to evaluate flips. Otherwise falls back to HPWL-only.
 
     Orientations tried (relative to current N):
       FN  → negate x_offset  (mirror across Y axis)
@@ -894,6 +897,17 @@ def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
     n_hard = len(movable)
     improved = 0
 
+    # If benchmark provided, use full proxy evaluation
+    use_proxy = benchmark is not None and plc is not None
+    if use_proxy:
+        full_pos = benchmark.macro_positions.clone()
+        full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+        try:
+            base_result = compute_proxy_cost(full_pos, benchmark, plc)
+            current_proxy = base_result["proxy_cost"]
+        except Exception:
+            use_proxy = False
+
     for i in range(n_hard):
         if not movable[i]:
             continue
@@ -901,9 +915,13 @@ def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
         if not affected:
             continue
 
-        # Current HPWL for affected nets
-        base_hpwl = sum(_net_hpwl(nets[ni], pos) for ni in affected)
-        best_hpwl = base_hpwl
+        if not use_proxy:
+            # HPWL-only evaluation
+            base_hpwl = sum(_net_hpwl(nets[ni], pos) for ni in affected)
+            best_score = base_hpwl
+        else:
+            best_score = current_proxy
+
         best_flip = None  # None = keep current orientation
 
         # Collect (net_idx, pin_position_in_array) for all pins of macro i
@@ -915,22 +933,48 @@ def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
                 if idxs[k] == i:
                     pin_locs.append((ni, k))
 
-        # Save original offsets
+        # Save original offsets (both net data and plc)
         orig_ox = [(ni, k, nets[ni]["hard_ox"][k]) for ni, k in pin_locs]
         orig_oy = [(ni, k, nets[ni]["hard_oy"][k]) for ni, k in pin_locs]
+
+        # Save plc pin offsets for proxy-aware evaluation
+        plc_orig_offsets = {}
+        if use_proxy and plc is not None:
+            plc_idx = plc.hard_macro_indices[i]
+            macro_name = plc.modules_w_pins[plc_idx].get_name()
+            pin_names = plc.hard_macros_to_inpins.get(macro_name, [])
+            for pin_name in pin_names:
+                if pin_name in plc.mod_name_to_indices:
+                    pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
+                    plc_orig_offsets[pin_name] = pin_obj.get_offset()
 
         for flip_name, flip_x, flip_y in [("FN", True, False),
                                             ("FS", False, True),
                                             ("S",  True, True)]:
-            # Apply flip
+            # Apply flip to net data
             for ni, k, ox in orig_ox:
                 nets[ni]["hard_ox"][k] = -ox if flip_x else ox
             for ni, k, oy in orig_oy:
                 nets[ni]["hard_oy"][k] = -oy if flip_y else oy
 
-            trial_hpwl = sum(_net_hpwl(nets[ni], pos) for ni in affected)
-            if trial_hpwl < best_hpwl:
-                best_hpwl = trial_hpwl
+            if use_proxy:
+                # Also apply flip to plc pin offsets for proxy evaluation
+                for pin_name, (ox, oy) in plc_orig_offsets.items():
+                    pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
+                    pin_obj.set_offset(-ox if flip_x else ox, -oy if flip_y else oy)
+                # Evaluate full proxy
+                try:
+                    plc.FLAG_UPDATE_WIRELENGTH = True
+                    plc.FLAG_UPDATE_CONGESTION = True
+                    trial_result = compute_proxy_cost(full_pos, benchmark, plc)
+                    trial_score = trial_result["proxy_cost"]
+                except Exception:
+                    trial_score = float("inf")
+            else:
+                trial_score = sum(_net_hpwl(nets[ni], pos) for ni in affected)
+
+            if trial_score < best_score:
+                best_score = trial_score
                 best_flip = (flip_x, flip_y, flip_name)
 
             # Restore originals
@@ -938,6 +982,10 @@ def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
                 nets[ni]["hard_ox"][k] = ox
             for ni, k, oy in orig_oy:
                 nets[ni]["hard_oy"][k] = oy
+            if use_proxy:
+                for pin_name, (ox, oy) in plc_orig_offsets.items():
+                    pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
+                    pin_obj.set_offset(ox, oy)
 
         if best_flip is not None:
             flip_x, flip_y, flip_name = best_flip
@@ -951,21 +999,125 @@ def _greedy_flip(pos, nets, macro_to_nets, movable, plc):
 
             # Update plc pin offsets so evaluation reflects the flip
             if plc is not None:
-                plc_idx = plc.hard_macro_indices[i]
-                macro_name = plc.modules_w_pins[plc_idx].get_name()
-                pin_names = plc.hard_macros_to_inpins.get(macro_name, [])
-                for pin_name in pin_names:
-                    if pin_name not in plc.mod_name_to_indices:
-                        continue
+                for pin_name, (ox, oy) in plc_orig_offsets.items():
                     pin_obj = plc.modules_w_pins[plc.mod_name_to_indices[pin_name]]
-                    ox, oy = pin_obj.get_offset()
-                    new_ox = -ox if flip_x else ox
-                    new_oy = -oy if flip_y else oy
-                    pin_obj.set_offset(new_ox, new_oy)
+                    pin_obj.set_offset(-ox if flip_x else ox, -oy if flip_y else oy)
+
+            if use_proxy:
+                current_proxy = best_score
+                plc.FLAG_UPDATE_WIRELENGTH = True
+                plc.FLAG_UPDATE_CONGESTION = True
 
             improved += 1
 
     return improved
+
+
+# ── post-SA local search (proxy-aware) ─────────────────────────────────
+
+def _proxy_local_search(
+    pos: np.ndarray,
+    benchmark: Benchmark,
+    plc,
+    movable: np.ndarray,
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    max_macros: int = 15,
+    shift_frac: float = 0.03,
+    time_budget: float = 30.0,
+) -> np.ndarray:
+    """Greedy local search using the real proxy evaluator (WL + density + congestion).
+
+    Tries small shifts for the largest movable macros (biggest impact on congestion).
+    Only 4 cardinal directions at one magnitude per macro to keep runtime bounded.
+    Stops early if time_budget (seconds) is exceeded.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+
+    n_hard = len(movable)
+    pos = pos.copy()
+    GAP = 0.05
+
+    # Build initial full placement and evaluate baseline proxy
+    full_pos = benchmark.macro_positions.clone()
+    full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+    try:
+        baseline = compute_proxy_cost(full_pos, benchmark, plc)
+        best_proxy = baseline["proxy_cost"]
+    except Exception:
+        return pos  # Can't evaluate, return unchanged
+
+    # Sort macros by area (largest first — biggest congestion impact)
+    areas = sizes[:, 0] * sizes[:, 1]
+    macro_order = sorted(
+        [i for i in range(n_hard) if movable[i]],
+        key=lambda i: -areas[i],
+    )[:max_macros]
+
+    shift_x = cw * shift_frac
+    shift_y = ch * shift_frac
+    directions = [
+        (shift_x, 0), (-shift_x, 0),
+        (0, shift_y), (0, -shift_y),
+    ]
+
+    for i in macro_order:
+        if _time.monotonic() - t0 > time_budget:
+            break  # Time budget exceeded
+        old_x, old_y = pos[i, 0], pos[i, 1]
+        best_shift = None
+        best_shift_proxy = best_proxy
+
+        for dx, dy in directions:
+            new_x = float(np.clip(old_x + dx, half_w[i], cw - half_w[i]))
+            new_y = float(np.clip(old_y + dy, half_h[i], ch - half_h[i]))
+
+            if abs(new_x - old_x) < 0.01 and abs(new_y - old_y) < 0.01:
+                continue
+
+            # Check overlap
+            pos[i, 0] = new_x
+            pos[i, 1] = new_y
+            dx_arr = np.abs(pos[i, 0] - pos[:, 0])
+            dy_arr = np.abs(pos[i, 1] - pos[:, 1])
+            ov = (dx_arr < sep_x[i] + GAP) & (dy_arr < sep_y[i] + GAP)
+            ov[i] = False
+            if ov.any():
+                pos[i, 0] = old_x
+                pos[i, 1] = old_y
+                continue
+
+            # Evaluate full proxy
+            full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+            try:
+                trial = compute_proxy_cost(full_pos, benchmark, plc)
+                trial_proxy = trial["proxy_cost"]
+            except Exception:
+                pos[i, 0] = old_x
+                pos[i, 1] = old_y
+                continue
+
+            if trial_proxy < best_shift_proxy:
+                best_shift_proxy = trial_proxy
+                best_shift = (new_x, new_y)
+
+            pos[i, 0] = old_x
+            pos[i, 1] = old_y
+
+        # Apply best shift if improvement found
+        if best_shift is not None:
+            pos[i, 0], pos[i, 1] = best_shift
+            best_proxy = best_shift_proxy
+            # Update full_pos for next macro's evaluation
+            full_pos[:n_hard] = torch.tensor(pos, dtype=torch.float32)
+
+    return pos
 
 
 # ── soft-macro force-directed update ────────────────────────────────────────
@@ -1253,9 +1405,19 @@ class SAPlacer(BasePlacer):
         else:
             best_pos = init_pos
 
-        # Greedy macro flipping post-processing
+        # Greedy macro flipping post-processing (HPWL-only, fast)
         if nets:
             _greedy_flip(best_pos, nets, macro_to_nets, movable, plc)
+
+        # Post-SA local search: greedy shifts using real proxy evaluator
+        # Targets congestion directly (real evaluator includes congestion cost)
+        # Limited to top 15 largest macros × 4 directions = ~60 proxy evals max
+        if plc is not None:
+            best_pos = _proxy_local_search(
+                best_pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                max_macros=15, shift_frac=0.03,
+            )
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
