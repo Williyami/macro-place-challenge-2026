@@ -1380,20 +1380,21 @@ class SAV2Placer(BasePlacer):
         capture_snapshots: bool = True,
         snapshot_interval: int = 2_000,
         trace_interval: int = 500,
-        t_start_factor: float = 0.12,
-        t_end_factor: float = 0.0008,
+        t_start_factor: float = 0.15,
+        t_end_factor: float = 0.001,
         num_starts: int = 1,
-        reheat_threshold: int = 8_000,
+        reheat_threshold: int = 5_000,
         reheat_factor: float = 3.0,
         per_benchmark_overrides=None,
         analytical_warmstart: bool = False,
         density_weight_boost: float = 1.0,
         select_best_by_proxy: bool = True,
         lahc_length: int = 0,
-        greedy_tail_frac: float = 0.0,
-        greedy_local_passes: int = 0,
-        adaptive_moves: bool = False,
-        gpu_refine_steps: int = 0,
+        greedy_tail_frac: float = 0.05,
+        greedy_local_passes: int = 3,
+        adaptive_moves: bool = True,
+        gpu_refine_steps: int = 200,
+        congestion_weight_factor: float = 1.0,
     ):
         self.seed = seed
         self.max_iters = max_iters
@@ -1415,6 +1416,7 @@ class SAV2Placer(BasePlacer):
         self.greedy_local_passes = greedy_local_passes
         self.adaptive_moves = adaptive_moves
         self.gpu_refine_steps = gpu_refine_steps
+        self.congestion_weight_factor = congestion_weight_factor
         self.debug_snapshots = []
         self.debug_trace = []
 
@@ -1500,9 +1502,10 @@ class SAV2Placer(BasePlacer):
 
         capture_snapshot(init_pos)
 
-        # Density weight calibration
+        # Density + congestion weight calibration
         grid_col = grid_row = 0
         density_w = 0.0
+        congestion_w = 0.0
         if plc is not None and nets:
             try:
                 grid_col, grid_row = plc.grid_col, plc.grid_row
@@ -1517,9 +1520,21 @@ class SAV2Placer(BasePlacer):
                     if wl_norm > 1e-10 and raw_hpwl > 1e-10:
                         density_w = 0.5 * raw_hpwl / wl_norm
                         density_w *= self.density_weight_boost
+                        # Calibrate RUDY congestion weight relative to HPWL scale
+                        rgrid_col = rgrid_row = RUDY_GRID
+                        rgw = cw / rgrid_col
+                        rgh = ch / rgrid_row
+                        rudy_grid, _ = _build_rudy_grid(
+                            init_pos, nets, rgrid_col, rgrid_row, rgw, rgh)
+                        rudy_l2 = _rudy_cost_l2(rudy_grid)
+                        if rudy_l2 > 1e-10:
+                            # Weight so that congestion contribution is ~10% of HPWL
+                            congestion_w = 0.1 * raw_hpwl / rudy_l2
+                            congestion_w *= self.congestion_weight_factor
             except Exception:
                 grid_col = grid_row = 0
                 density_w = 0.0
+                congestion_w = 0.0
 
         # Multi-start SA
         num_starts = params["num_starts"]
@@ -1553,6 +1568,7 @@ class SAV2Placer(BasePlacer):
                     lahc_length=self.lahc_length,
                     greedy_tail_frac=self.greedy_tail_frac,
                     adaptive_moves=self.adaptive_moves,
+                    congestion_weight=congestion_w,
                 )
 
                 # Greedy local search post-processing

@@ -65,13 +65,15 @@ class MacroPlacer:
                 run_fd=False,
                 snapshot_interval=2_000,
                 trace_interval=500,
-                t_start_factor=0.12,
-                t_end_factor=0.0008,
+                t_start_factor=0.15,
+                t_end_factor=0.001,
                 reheat_threshold=5_000,
-                lahc_length=200,
+                lahc_length=0,
                 greedy_tail_frac=0.05,
                 greedy_local_passes=3,
                 adaptive_moves=True,
+                gpu_refine_steps=200,
+                congestion_weight_factor=1.0,
             )
         elif METHOD == "will_seed":
             from submissions.will_seed.placer import WillSeedPlacer
