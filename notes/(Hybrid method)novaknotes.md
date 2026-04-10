@@ -645,3 +645,113 @@ Total runtime: **1829.28s** (~30.5 min for all 17 benchmarks)
 | ibm17     | 1.7493 |      3.6726 |  1.6446 | +52.4% |      -6.4% |        0 |
 | ibm18     | 1.7871 |      2.7755 |  1.7722 | +35.6% |      -0.8% |        0 |
 | **AVG**   | **1.4827** | **2.1251** | **1.4578** | **+30.2%** | **-1.7%** | **0** |
+
+---
+
+## 2026-04-09 — H9 (v9): Hotspot Evacuation + ILS Random Kicks
+
+Added two new phases on top of the v8 pipeline aimed at the remaining congestion gap:
+
+1. **Congestion hotspot evacuation** — reads the real post-smoothing
+   `H_routing_cong + V_routing_cong` arrays from `plc` (populated by the last
+   proxy-evaluator call), identifies the top-5% hottest grid cells (these
+   define the ABU-top-5% congestion score), finds movable macros sitting
+   inside them, and proposes large jumps to cold cells (bottom 50%). First
+   phase that acts directly on the real congestion metric instead of using
+   HPWL as a proxy. Prefers low-connectivity macros first (minimal HPWL
+   damage), re-reads the hot map between passes.
+2. **ILS random kicks** — randomises 15% of the low-connectivity macros,
+   legalises, runs 80 GPU refine steps + one short greedy pass, accepts
+   only if the full proxy improves. Does 3 kicks with a 30 s budget per
+   benchmark. Only phase capable of escaping the deep local minimum that
+   v7 / v8 / v9-swap / v9-cluster all converge to.
+
+Both phases go through `_update_global_best` so regressions revert automatically.
+
+### How to replicate
+
+```bash
+PLACER_METHOD=hybrid uv run evaluate submissions/placer.py --all --no-media
+```
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **1452.63s** (~24.2 min for all 17 benchmarks — down from 1829s in v8)
+
+| Benchmark | v9 Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | v8 Proxy | Change | Overlaps |
+|-----------|----------|-------------|---------|--------|------------|----------|--------|----------|
+| ibm01     |   1.1167 |      1.3166 |  0.9976 | +15.2% |     -11.9% |   1.1167 |   0.0% |        0 |
+| ibm02     |   1.5970 |      1.9072 |  1.8370 | +16.3% |     +13.1% |   1.5970 |   0.0% |        0 |
+| ibm03     |   1.3886 |      1.7401 |  1.3222 | +20.2% |      -5.0% |   1.3886 |   0.0% |        0 |
+| ibm04     |   1.3922 |      1.5037 |  1.3024 |  +7.4% |      -6.9% |   1.3923 |  -0.0% |        0 |
+| ibm06     |   1.6923 |      2.5057 |  1.6187 | +32.5% |      -4.5% |   1.6923 |   0.0% |        0 |
+| ibm07     |   1.4864 |      2.0229 |  1.4633 | +26.5% |      -1.6% |   1.4864 |   0.0% |        0 |
+| ibm08     |   1.5222 |      1.9239 |  1.4285 | +20.9% |      -6.6% |   1.5223 |  -0.0% |        0 |
+| ibm09     |   1.1027 |      1.3875 |  1.1194 | +20.5% |      +1.5% |   1.1027 |   0.0% |        0 |
+| ibm10     |   1.3697 |      2.1108 |  1.5009 | +35.1% |      +8.7% |   1.3697 |   0.0% |        0 |
+| ibm11     |   1.2315 |      1.7111 |  1.1774 | +28.0% |      -4.6% |   1.2315 |   0.0% |        0 |
+| ibm12     |   1.6441 |      2.8261 |  1.7261 | +41.8% |      +4.7% |   1.6441 |   0.0% |        0 |
+| ibm13     |   1.3894 |      1.9141 |  1.3355 | +27.4% |      -4.0% |   1.3895 |  -0.0% |        0 |
+| ibm14     |   1.6145 |      2.2750 |  1.5436 | +29.0% |      -4.6% |   1.6145 |   0.0% |        0 |
+| ibm15     |   1.5939 |      2.3000 |  1.5159 | +30.7% |      -5.1% |   1.5939 |   0.0% |        0 |
+| ibm16     |   1.5277 |      2.2337 |  1.4780 | +31.6% |      -3.4% |   1.5277 |   0.0% |        0 |
+| ibm17     |   1.7493 |      3.6726 |  1.6446 | +52.4% |      -6.4% |   1.7493 |   0.0% |        0 |
+| ibm18     |   1.7871 |      2.7755 |  1.7722 | +35.6% |      -0.8% |   1.7871 |   0.0% |        0 |
+| **AVG**   | **1.4827** | **2.1251** | **1.4578** | **+30.2%** | **-1.7%** | **1.4827** | **0.0%** | **0** |
+
+## Benchmark Results (2026-04-09, v9)
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **1452.63s** (~24.2 min for all 17 benchmarks)
+
+| Benchmark |  Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | Overlaps |
+|-----------|--------|-------------|---------|--------|------------|----------|
+| ibm01     | 1.1167 |      1.3166 |  0.9976 | +15.2% |     -11.9% |        0 |
+| ibm02     | 1.5970 |      1.9072 |  1.8370 | +16.3% |     +13.1% |        0 |
+| ibm03     | 1.3886 |      1.7401 |  1.3222 | +20.2% |      -5.0% |        0 |
+| ibm04     | 1.3922 |      1.5037 |  1.3024 |  +7.4% |      -6.9% |        0 |
+| ibm06     | 1.6923 |      2.5057 |  1.6187 | +32.5% |      -4.5% |        0 |
+| ibm07     | 1.4864 |      2.0229 |  1.4633 | +26.5% |      -1.6% |        0 |
+| ibm08     | 1.5222 |      1.9239 |  1.4285 | +20.9% |      -6.6% |        0 |
+| ibm09     | 1.1027 |      1.3875 |  1.1194 | +20.5% |      +1.5% |        0 |
+| ibm10     | 1.3697 |      2.1108 |  1.5009 | +35.1% |      +8.7% |        0 |
+| ibm11     | 1.2315 |      1.7111 |  1.1774 | +28.0% |      -4.6% |        0 |
+| ibm12     | 1.6441 |      2.8261 |  1.7261 | +41.8% |      +4.7% |        0 |
+| ibm13     | 1.3894 |      1.9141 |  1.3355 | +27.4% |      -4.0% |        0 |
+| ibm14     | 1.6145 |      2.2750 |  1.5436 | +29.0% |      -4.6% |        0 |
+| ibm15     | 1.5939 |      2.3000 |  1.5159 | +30.7% |      -5.1% |        0 |
+| ibm16     | 1.5277 |      2.2337 |  1.4780 | +31.6% |      -3.4% |        0 |
+| ibm17     | 1.7493 |      3.6726 |  1.6446 | +52.4% |      -6.4% |        0 |
+| ibm18     | 1.7871 |      2.7755 |  1.7722 | +35.6% |      -0.8% |        0 |
+| **AVG**   | **1.4827** | **2.1251** | **1.4578** | **+30.2%** | **-1.7%** | **0** |
+
+### Summary
+
+- **Average proxy cost: 1.4827** — indistinguishable from v8 at 4 decimal places.
+- Tiny positive drifts (single 4th-decimal ticks) on ibm04, ibm08, ibm13 —
+  noise, not a real signal.
+- **Runtime dropped ~21%**: 1829s → 1452s. Gain comes from v9 ordering
+  more expensive phases after cheaper ones and from the global-best
+  safety net short-circuiting degraded phases.
+- **Interpretation**: neither the hotspot evacuation nor the ILS kicks
+  moved the needle. The pipeline appears to be at (or very near) a
+  fixed point for the full proxy evaluator given the time budget —
+  large jumps into "cold" cells are evidently relegalised back into
+  near-equivalent HPWL positions, and random kicks are relaxed back
+  by the short GPU refine + greedy. Next round should attack this
+  differently: either (a) re-run the early phases (SA + analytical)
+  from multiple seeds and keep the best by full-proxy score, or
+  (b) add a phase that explicitly trades HPWL for congestion by
+  perturbing macros *along the connectivity gradient* rather than
+  to arbitrary cold cells.
+- Zero overlaps on all 17 benchmarks.
+
+### Leaderboard Position
+
+| Rank | Method | Avg Proxy |
+|------|--------|-----------|
+| 1 | RePlAce (baseline) | 1.4578 |
+| 2 | **HybridPlacer v9 (ours)** | **1.4827** |
+| 3 | HybridPlacer v8 | 1.4827 |
+| 4 | HybridPlacer v7 | 1.4828 |
+| 5 | HybridPlacer v5 | 1.5723 |
+| 6 | SA (baseline) | 2.1251 |

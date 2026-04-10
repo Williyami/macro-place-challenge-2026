@@ -34,6 +34,7 @@ This graph summarizes the full-suite benchmark sections logged in the notes.
 | H6 | HybridPlacer | 2026-04-08, v6 | full_suite | 1.4828 | 17 |
 | H7 | HybridPlacer | 2026-04-08, v7 | full_suite | 1.4828 | 17 |
 | H8 | HybridPlacer | 2026-04-08, v8 | full_suite | 1.4827 | 17 |
+| H9 | HybridPlacer | 2026-04-09, v9 | full_suite | 1.4827 | 17 |
 | V1 | SA V2 (Eklund) | 2026-04-06 | full_suite | 1.5697 | 17 |
 | V2 | SA V2 (Eklund) | 2026-04-07 | full_suite | 1.5738 | 17 |
 

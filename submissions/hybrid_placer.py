@@ -1,34 +1,45 @@
 """
-Hybrid Placer v8 — Multi-candidate analytical → pre-SA GPU smooth → SA → GPU refine
-                   → Greedy refine → flip → GPU polish → fine greedy → micro GPU polish.
+Hybrid Placer v10 — multi-seed early pipeline on top of the v9 hotspot
+                    evacuation + ILS kicks pipeline.
 
-Improvements over v7 (avg 1.4828):
-  - Pre-SA GPU smoothing (100 steps): removes legalization artifacts before SA starts,
-    giving SA a cleaner starting point
-  - Post-first-greedy flip: a second _greedy_flip after the main greedy passes catches
-    new optimal orientations that greedy position shifts may have unlocked
-  - Second greedy cycle with fine scales (0.001–0.05): 3 passes after GPU polish to
-    capture sub-pixel improvements the coarser first pass (0.004–0.12) missed
-  - Final micro GPU polish (100 steps, lr=0.02, tight anchor=0.1): smooths remaining
-    interaction artifacts from the second greedy cycle
+Improvements over v9:
+  - Multi-seed early pipeline: the top-K analytical candidates (ranked by
+    legalized proxy) each get pushed all the way through pre-SA smoothing,
+    main SA, and congestion SA, with their own random seeds so the SA move
+    streams diverge.  The best pipeline output by full proxy is kept for
+    the late stages.  This is the answer to the observation that every
+    late-stage local move (greedy, swap, cluster, ultrafine, hotspot, ILS)
+    has exhausted its reach and can no longer improve the proxy cost —
+    the remaining headroom is diversity in the starting basin, which only
+    the analytical+SA stages can produce.
+  - Congestion hotspot evacuation (v9): reads the REAL post-smoothing
+    congestion map from the proxy evaluator and relocates macros inside
+    top-5% hot cells to cold regions.
+  - ILS random kicks (v9): escape the local minimum by randomly relocating
+    15% of low-connectivity macros, legalizing, GPU refine, greedy pass,
+    accept on full-proxy improvement.
+  - Global-best tracking: every phase reverts if it degrades the best
+    proxy score achieved so far (safety net against regressions).
 
-Strategy:
-  1. Analytical phase: 7 candidates × 2500 Adam steps with gamma annealing,
-     quadratic init, cosine LR, HPWL + density + congestion + repulsion + overlap.
-  2. Legalization: Minimum-displacement snap to resolve overlaps.
-  3. Pre-SA GPU smoothing: 100-step differentiable pass (tight anchor) to remove
-     legalization displacement artifacts before SA.
-  4. SA phase: HPWL + density co-optimization with reheating (300K iters).
-  5. Greedy flip: Try mirror orientations for each macro to reduce HPWL.
-  6. GPU refine: Cosine-scheduled differentiable pass with congestion-aware loss (500 steps).
-  7. Greedy refine: Connectivity-sorted evaluator-guided coordinate descent (5 passes,
-     scales 0.004–0.12).
-  8. Post-greedy flip: Second orientation flip after greedy has repositioned macros.
-  9. GPU polish: Short differentiable pass after greedy to remove interaction artifacts
-     (200 steps, lr=0.04).
-  10. Fine greedy: 3-pass coordinate descent with fine scales (0.001–0.05).
-  11. Micro GPU polish: 100-step tight-anchor polish after fine greedy.
-  12. Soft recenter: Move soft macros to weighted pin centroids.
+Pipeline:
+  1. Analytical: 7 candidates × 2500 Adam steps, ranked by legalized proxy.
+  2. Multi-seed early loop (top-K analytical candidates, default K=3):
+       pre-SA GPU smoothing → SA (300K) → congestion SA (40K), distinct
+       seed per candidate; best full-proxy pipeline output is kept.
+  5. Greedy flip #1.
+  6. GPU refine (500 steps, congestion-aware).
+  7. Greedy refine (5 passes, coarse scales 0.004–0.12).
+  8. Pairwise swap greedy (2 passes, top-8 neighbors).
+  9. Greedy flip #2.
+  10. GPU polish (200 steps).
+  11. Fine greedy (3 passes, fine scales 0.001–0.05).
+  12. Cluster translation greedy (20 clusters × 5 macros).
+  13. Micro GPU polish (100 steps).
+  14. Proxy local search (20 biggest macros).
+  15. Ultrafine refinement (top-20 connectivity).
+  16. **NEW: Congestion hotspot evacuation** (top-5% cells → cold cells).
+  17. **NEW: ILS random kicks** (3 kicks × 15% low-conn macros).
+  18. Soft recenter.
 
 Usage:
     uv run evaluate submissions/hybrid_placer.py
@@ -1410,33 +1421,668 @@ def _recenter_soft_macros(pos_hard: np.ndarray, benchmark, plc):
     return np.array(soft_positions, dtype=np.float64) if soft_positions else np.empty((0, 2))
 
 
+# ── Pairwise swap greedy refinement ────────────────────────────────────────
+
+def _build_connectivity_neighbors(
+    nets: list[dict],
+    macro_to_nets: list[list[int]],
+    movable: np.ndarray,
+    max_neighbors: int = 8,
+) -> dict:
+    """
+    Build a dict {macro_idx: [top_k_neighbor_idx]} ordered by net-weight sum.
+    Only includes movable macros.  Used by swap and cluster greedy phases.
+    """
+    n = len(movable)
+    result = {}
+    for i in range(n):
+        if not movable[i]:
+            continue
+        weights: dict[int, float] = {}
+        for net_idx in macro_to_nets[i]:
+            net = nets[net_idx]
+            w = float(net["weight"])
+            # Per-pin contribution: weight is shared among pins in the net
+            n_pins = max(1, len(net["hard_idx"]))
+            per_pin_w = w / n_pins
+            for j in net["hard_idx"]:
+                if j == i or not movable[j]:
+                    continue
+                weights[int(j)] = weights.get(int(j), 0.0) + per_pin_w
+        top = sorted(weights.items(), key=lambda kv: -kv[1])[:max_neighbors]
+        result[i] = [j for j, _ in top]
+    return result
+
+
+def _swap_greedy_refine(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    nets: list[dict],
+    macro_to_nets: list[list[int]],
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    max_passes: int = 2,
+    max_neighbors: int = 8,
+):
+    """
+    Pairwise-swap greedy using the real proxy evaluator.
+
+    For each movable macro i, try swapping positions with its top-k
+    most-connected movable neighbors.  Accepts the swap if actual proxy
+    cost improves and no overlap is introduced.
+
+    This unlocks configurations that single-macro translation moves
+    cannot reach — e.g., when macros A and B would each prefer the
+    other's slot but can't pass through each other.
+    """
+    GAP = 0.05
+    n_hard = len(movable)
+    best_pos = pos.copy()
+    best_score = _proxy_score_pos(benchmark, plc, best_pos)
+
+    neighbors_map = _build_connectivity_neighbors(
+        nets, macro_to_nets, movable, max_neighbors=max_neighbors,
+    )
+
+    def _has_overlap(idx):
+        ddx = np.abs(best_pos[idx, 0] - best_pos[:, 0])
+        ddy = np.abs(best_pos[idx, 1] - best_pos[:, 1])
+        ov = (ddx < sep_x[idx] + GAP) & (ddy < sep_y[idx] + GAP)
+        ov[idx] = False
+        return bool(ov.any())
+
+    tried_pairs: set[tuple[int, int]] = set()
+
+    for pass_num in range(max_passes):
+        improved = False
+        order = list(neighbors_map.keys())
+        np.random.shuffle(order)
+
+        for i in order:
+            old_ix, old_iy = best_pos[i, 0], best_pos[i, 1]
+            best_local_j = None
+            best_local_score = best_score
+
+            for j in neighbors_map[i]:
+                pair_key = (min(i, j), max(i, j))
+                if pair_key in tried_pairs:
+                    continue
+
+                old_jx, old_jy = best_pos[j, 0], best_pos[j, 1]
+
+                # Swap positions with per-macro bound clamping
+                new_ix = float(np.clip(old_jx, half_w[i], cw - half_w[i]))
+                new_iy = float(np.clip(old_jy, half_h[i], ch - half_h[i]))
+                new_jx = float(np.clip(old_ix, half_w[j], cw - half_w[j]))
+                new_jy = float(np.clip(old_iy, half_h[j], ch - half_h[j]))
+
+                if new_ix == old_ix and new_iy == old_iy and new_jx == old_jx and new_jy == old_jy:
+                    continue
+
+                best_pos[i, 0] = new_ix; best_pos[i, 1] = new_iy
+                best_pos[j, 0] = new_jx; best_pos[j, 1] = new_jy
+
+                if _has_overlap(i) or _has_overlap(j):
+                    best_pos[i, 0] = old_ix; best_pos[i, 1] = old_iy
+                    best_pos[j, 0] = old_jx; best_pos[j, 1] = old_jy
+                    continue
+
+                score = _proxy_score_pos(benchmark, plc, best_pos)
+                if score < best_local_score - 1e-6:
+                    best_local_score = score
+                    best_local_j = j
+
+                # Revert for next trial (we'll re-apply best at the end)
+                best_pos[i, 0] = old_ix; best_pos[i, 1] = old_iy
+                best_pos[j, 0] = old_jx; best_pos[j, 1] = old_jy
+
+            if best_local_j is not None:
+                j = best_local_j
+                old_jx, old_jy = best_pos[j, 0], best_pos[j, 1]
+                new_ix = float(np.clip(old_jx, half_w[i], cw - half_w[i]))
+                new_iy = float(np.clip(old_jy, half_h[i], ch - half_h[i]))
+                new_jx = float(np.clip(old_ix, half_w[j], cw - half_w[j]))
+                new_jy = float(np.clip(old_iy, half_h[j], ch - half_h[j]))
+                best_pos[i, 0] = new_ix; best_pos[i, 1] = new_iy
+                best_pos[j, 0] = new_jx; best_pos[j, 1] = new_jy
+                best_score = best_local_score
+                improved = True
+                tried_pairs.add((min(i, j), max(i, j)))
+
+        if not improved:
+            break
+
+    return best_pos
+
+
+# ── Cluster translation greedy ─────────────────────────────────────────────
+
+def _cluster_translate_refine(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    nets: list[dict],
+    macro_to_nets: list[list[int]],
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    cluster_size: int = 5,
+    max_clusters: int = 20,
+    scales: tuple = (0.005, 0.015, 0.04),
+):
+    """
+    Cluster translation greedy: for each seed macro, identify its top-k
+    most-connected movable neighbors, treat them as a cluster, and try
+    translating the whole group by small offsets.  Accepts if actual
+    proxy cost improves and no new overlaps are introduced.
+
+    This lets sub-structures move to lower-congestion regions that single
+    macro translations can't reach (single moves get stuck as soon as
+    neighbors overlap).
+    """
+    GAP = 0.05
+    n_hard = len(movable)
+    best_pos = pos.copy()
+    best_score = _proxy_score_pos(benchmark, plc, best_pos)
+
+    neighbors_map = _build_connectivity_neighbors(
+        nets, macro_to_nets, movable, max_neighbors=cluster_size,
+    )
+
+    # Pick seeds by total connectivity weight (descending)
+    conn_total = np.zeros(n_hard)
+    for net in nets:
+        w = float(net["weight"])
+        for idx in net["hard_idx"]:
+            conn_total[idx] += w
+    seed_candidates = [i for i in range(n_hard) if movable[i]]
+    seed_candidates.sort(key=lambda i: -conn_total[i])
+    seeds = seed_candidates[:max_clusters]
+
+    directions = [
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    ]
+
+    def _cluster_has_overlap(indices):
+        for idx in indices:
+            ddx = np.abs(best_pos[idx, 0] - best_pos[:, 0])
+            ddy = np.abs(best_pos[idx, 1] - best_pos[:, 1])
+            ov = (ddx < sep_x[idx] + GAP) & (ddy < sep_y[idx] + GAP)
+            ov[idx] = False
+            # Allow overlap with other cluster members (they move together)
+            for other in indices:
+                if other != idx:
+                    ov[other] = False
+            if ov.any():
+                return True
+        return False
+
+    for seed in seeds:
+        cluster = [seed] + neighbors_map.get(seed, [])
+        cluster = [c for c in cluster if movable[c]][:cluster_size]
+        if len(cluster) < 2:
+            continue
+
+        saved = {c: (best_pos[c, 0], best_pos[c, 1]) for c in cluster}
+        best_local_score = best_score
+        best_local_offset = None
+
+        for scale in scales:
+            dx = cw * scale
+            dy = ch * scale
+            for ax, ay in directions:
+                ox = ax * dx
+                oy = ay * dy
+
+                valid = True
+                for c in cluster:
+                    nx = saved[c][0] + ox
+                    ny = saved[c][1] + oy
+                    if nx < half_w[c] or nx > cw - half_w[c]:
+                        valid = False; break
+                    if ny < half_h[c] or ny > ch - half_h[c]:
+                        valid = False; break
+                if not valid:
+                    continue
+
+                for c in cluster:
+                    best_pos[c, 0] = saved[c][0] + ox
+                    best_pos[c, 1] = saved[c][1] + oy
+
+                if _cluster_has_overlap(cluster):
+                    for c in cluster:
+                        best_pos[c, 0] = saved[c][0]
+                        best_pos[c, 1] = saved[c][1]
+                    continue
+
+                score = _proxy_score_pos(benchmark, plc, best_pos)
+                if score < best_local_score - 1e-6:
+                    best_local_score = score
+                    best_local_offset = (ox, oy)
+
+                for c in cluster:
+                    best_pos[c, 0] = saved[c][0]
+                    best_pos[c, 1] = saved[c][1]
+
+        if best_local_offset is not None:
+            ox, oy = best_local_offset
+            for c in cluster:
+                best_pos[c, 0] = saved[c][0] + ox
+                best_pos[c, 1] = saved[c][1] + oy
+            best_score = best_local_score
+
+    return best_pos
+
+
+# ── Ultra-fine final refinement on top-connectivity macros ─────────────────
+
+def _ultrafine_refine(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    connectivity_weights: np.ndarray,
+    top_k: int = 20,
+    scales: tuple = (0.0005, 0.0015, 0.005),
+):
+    """
+    Ultra-fine final refinement: for the top-k highest-connectivity macros,
+    try very small perturbations to catch sub-scale improvements that the
+    regular greedy passes (min scale 0.001) missed.  Intended as the very
+    last step before the placement is written.
+    """
+    GAP = 0.05
+    best_pos = pos.copy()
+    best_score = _proxy_score_pos(benchmark, plc, best_pos)
+
+    movable_idx = np.where(movable)[0]
+    if len(movable_idx) == 0:
+        return best_pos
+    order = sorted(movable_idx, key=lambda i: -connectivity_weights[i])[:top_k]
+
+    directions = [
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    ]
+
+    for i in order:
+        old_x, old_y = best_pos[i, 0], best_pos[i, 1]
+        best_local_x, best_local_y = old_x, old_y
+        best_local_score = best_score
+
+        for scale in scales:
+            dx = cw * scale
+            dy = ch * scale
+            for ax, ay in directions:
+                new_x = float(np.clip(old_x + ax * dx, half_w[i], cw - half_w[i]))
+                new_y = float(np.clip(old_y + ay * dy, half_h[i], ch - half_h[i]))
+                if new_x == old_x and new_y == old_y:
+                    continue
+
+                best_pos[i, 0] = new_x
+                best_pos[i, 1] = new_y
+                ddx = np.abs(best_pos[i, 0] - best_pos[:, 0])
+                ddy = np.abs(best_pos[i, 1] - best_pos[:, 1])
+                ov = (ddx < sep_x[i] + GAP) & (ddy < sep_y[i] + GAP)
+                ov[i] = False
+                if ov.any():
+                    best_pos[i, 0] = old_x
+                    best_pos[i, 1] = old_y
+                    continue
+
+                score = _proxy_score_pos(benchmark, plc, best_pos)
+                if score < best_local_score - 1e-6:
+                    best_local_score = score
+                    best_local_x, best_local_y = new_x, new_y
+
+                best_pos[i, 0] = old_x
+                best_pos[i, 1] = old_y
+
+        if best_local_score < best_score - 1e-6:
+            best_pos[i, 0] = best_local_x
+            best_pos[i, 1] = best_local_y
+            best_score = best_local_score
+
+    return best_pos
+
+
+# ── Congestion hotspot evacuation ──────────────────────────────────────────
+
+def _evacuate_hotspots(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    connectivity_weights: np.ndarray,
+    n_hard_total: int,
+    top_percentile: float = 0.05,
+    max_candidates: int = 20,
+    num_targets: int = 6,
+    max_passes: int = 2,
+    time_budget: float = 20.0,
+):
+    """
+    Congestion hotspot evacuation: reads the actual post-smoothing routing
+    congestion arrays from the proxy evaluator, identifies top-5% hot cells
+    (these drive the ABU-top-5% congestion cost), and relocates movable
+    macros sitting in those cells to cold regions.
+
+    Critically different from all other phases: every existing greedy/swap
+    phase only makes pixel-scale moves.  This one proposes LARGE jumps
+    (cell-scale, up to half the canvas) directly targeting the cells that
+    define the proxy's congestion metric.  It does not rely on HPWL as a
+    proxy for congestion — it reads the real congestion map.
+    """
+    import time as _time
+    n = len(movable)
+    start = _time.time()
+
+    # Initial score and freshly-populated congestion arrays
+    try:
+        best_score = _proxy_score_pos(benchmark, plc, pos)
+    except Exception:
+        return pos
+    best_pos = pos.copy()
+
+    grid_col = int(getattr(plc, "grid_col", 0) or 0)
+    grid_row = int(getattr(plc, "grid_row", 0) or 0)
+    if grid_col <= 0 or grid_row <= 0:
+        return best_pos
+
+    total_cells = grid_col * grid_row
+    try:
+        H = np.asarray(plc.H_routing_cong, dtype=np.float64)
+        V = np.asarray(plc.V_routing_cong, dtype=np.float64)
+    except Exception:
+        return best_pos
+    if H.size != total_cells or V.size != total_cells:
+        return best_pos
+
+    cell_cong = H + V
+    sorted_idx = np.argsort(cell_cong)
+    hot_cutoff = max(1, int(total_cells * top_percentile))
+    hot_cells = set(sorted_idx[-hot_cutoff:].tolist())
+    cold_pool = sorted_idx[: max(1, total_cells // 2)].tolist()
+
+    gw = cw / grid_col
+    gh = ch / grid_row
+
+    def _cell_of(x, y):
+        c = int(max(0, min(grid_col - 1, x / gw)))
+        r = int(max(0, min(grid_row - 1, y / gh)))
+        return r * grid_col + c
+
+    # Find movable hard macros whose center sits in a hot cell
+    candidates = []
+    for i in range(n):
+        if not movable[i]:
+            continue
+        if _cell_of(best_pos[i, 0], best_pos[i, 1]) in hot_cells:
+            candidates.append(i)
+    if not candidates:
+        return best_pos
+
+    # Move low-connectivity macros first (less risk of breaking HPWL)
+    candidates.sort(key=lambda i: connectivity_weights[i])
+    candidates = candidates[:max_candidates]
+
+    rng = random.Random(20260409)
+
+    GAP = 0.05
+
+    def _has_overlap_arr(arr, idx):
+        ddx = np.abs(arr[idx, 0] - arr[:, 0])
+        ddy = np.abs(arr[idx, 1] - arr[:, 1])
+        ov = (ddx < sep_x[idx] + GAP) & (ddy < sep_y[idx] + GAP)
+        ov[idx] = False
+        return bool(ov.any())
+
+    for pass_num in range(max_passes):
+        improved_in_pass = False
+        for macro_idx in candidates:
+            if _time.time() - start > time_budget:
+                return best_pos
+
+            # Sample cold target cells fresh each pass (favour coldest first)
+            targets = cold_pool[:num_targets * 4]
+            rng.shuffle(targets)
+            targets = targets[:num_targets]
+
+            old_x = best_pos[macro_idx, 0]
+            old_y = best_pos[macro_idx, 1]
+            local_best_xy = None
+            local_best_score = best_score
+
+            for target_cell in targets:
+                r = target_cell // grid_col
+                c = target_cell % grid_col
+                tx = (c + 0.5) * gw
+                ty = (r + 0.5) * gh
+                tx = float(np.clip(tx, half_w[macro_idx], cw - half_w[macro_idx]))
+                ty = float(np.clip(ty, half_h[macro_idx], ch - half_h[macro_idx]))
+                if abs(tx - old_x) < 1e-6 and abs(ty - old_y) < 1e-6:
+                    continue
+
+                trial = best_pos.copy()
+                trial[macro_idx, 0] = tx
+                trial[macro_idx, 1] = ty
+
+                # Fast single-macro overlap check
+                if _has_overlap_arr(trial, macro_idx):
+                    # Legalize only if naive jump overlapped — much slower path
+                    try:
+                        trial = _legalize(
+                            trial, movable, sizes, half_w, half_h,
+                            cw, ch, n_hard_total, sep_x, sep_y,
+                        )
+                    except Exception:
+                        continue
+
+                try:
+                    score = _proxy_score_pos(benchmark, plc, trial)
+                except Exception:
+                    continue
+
+                if score < local_best_score - 1e-6:
+                    local_best_score = score
+                    local_best_xy = (float(trial[macro_idx, 0]), float(trial[macro_idx, 1]))
+                    # Keep the *full* trial array if legalization was invoked,
+                    # since other macros may have shifted slightly.
+                    best_pos_candidate = trial
+
+            if local_best_xy is not None:
+                best_pos = best_pos_candidate.copy()
+                best_score = local_best_score
+                improved_in_pass = True
+
+        if not improved_in_pass:
+            break
+
+        # Refresh hot cell list between passes using the updated placement.
+        try:
+            _ = _proxy_score_pos(benchmark, plc, best_pos)
+            H = np.asarray(plc.H_routing_cong, dtype=np.float64)
+            V = np.asarray(plc.V_routing_cong, dtype=np.float64)
+            if H.size == total_cells and V.size == total_cells:
+                cell_cong = H + V
+                sorted_idx = np.argsort(cell_cong)
+                hot_cells = set(sorted_idx[-hot_cutoff:].tolist())
+                cold_pool = sorted_idx[: max(1, total_cells // 2)].tolist()
+                candidates = [
+                    i for i in range(n)
+                    if movable[i] and _cell_of(best_pos[i, 0], best_pos[i, 1]) in hot_cells
+                ]
+                candidates.sort(key=lambda i: connectivity_weights[i])
+                candidates = candidates[:max_candidates]
+        except Exception:
+            pass
+
+    return best_pos
+
+
+# ── Iterated Local Search random kick ──────────────────────────────────────
+
+def _ils_kick_refine(
+    pos: np.ndarray,
+    benchmark,
+    plc,
+    movable: np.ndarray,
+    sizes: np.ndarray,
+    half_w: np.ndarray,
+    half_h: np.ndarray,
+    sep_x: np.ndarray,
+    sep_y: np.ndarray,
+    cw: float,
+    ch: float,
+    connectivity_weights: np.ndarray,
+    n_hard_total: int,
+    num_kicks: int = 3,
+    kick_fraction: float = 0.15,
+    gpu_refine_steps: int = 80,
+    greedy_passes: int = 1,
+    time_budget: float = 30.0,
+):
+    """
+    Iterated local search: escape the current basin by randomly relocating
+    a fraction of macros, re-legalizing, and re-converging with a short GPU
+    refine + single greedy pass.  Accept only if the full proxy evaluator
+    reports an improvement.
+
+    This is the only phase that can truly escape the deep local minimum
+    that v7-v9 all converge to — every other phase uses move proposals
+    that preserve most of the current configuration.
+    """
+    import time as _time
+    start = _time.time()
+    n = len(movable)
+
+    try:
+        best_score = _proxy_score_pos(benchmark, plc, pos)
+    except Exception:
+        return pos
+    best_pos = pos.copy()
+
+    movable_idx = np.where(movable)[0]
+    if len(movable_idx) == 0:
+        return best_pos
+
+    # Prefer kicking LOW-connectivity macros — they disturb HPWL less
+    low_conn_order = sorted(movable_idx.tolist(), key=lambda i: connectivity_weights[i])
+    kick_count = max(1, int(len(movable_idx) * kick_fraction))
+
+    rng = np.random.default_rng(7331)
+
+    for kick in range(num_kicks):
+        if _time.time() - start > time_budget:
+            break
+
+        # Pick a fresh subset of low-connectivity macros each kick
+        pool_size = min(len(low_conn_order), kick_count * 3)
+        pool = low_conn_order[:pool_size]
+        rng.shuffle(pool)
+        kicked = pool[:kick_count]
+
+        trial = best_pos.copy()
+        for mi in kicked:
+            # Random jump within the canvas margins
+            tx = rng.uniform(float(half_w[mi]), float(cw - half_w[mi]))
+            ty = rng.uniform(float(half_h[mi]), float(ch - half_h[mi]))
+            trial[mi, 0] = tx
+            trial[mi, 1] = ty
+
+        # Legalize to remove any newly-created overlaps
+        try:
+            trial = _legalize(
+                trial, movable, sizes, half_w, half_h,
+                cw, ch, n_hard_total, sep_x, sep_y,
+            )
+        except Exception:
+            continue
+
+        # Short GPU refine to relax the configuration toward a local min
+        try:
+            trial = _gpu_post_refine(
+                benchmark, plc, trial,
+                num_steps=gpu_refine_steps,
+                lr=0.02,
+                anchor_weight=0.03,
+                seed=1234 + kick,
+            )
+            trial = _legalize(
+                trial, movable, sizes, half_w, half_h,
+                cw, ch, n_hard_total, sep_x, sep_y,
+            )
+        except Exception:
+            pass
+
+        # One quick greedy pass at small-to-medium scales
+        if greedy_passes > 0:
+            try:
+                trial = _greedy_refine_proxy(
+                    trial, benchmark, plc, movable, sizes,
+                    half_w, half_h, sep_x, sep_y, cw, ch,
+                    max_passes=greedy_passes,
+                    scales=(0.003, 0.01, 0.03, 0.08),
+                    connectivity_weights=connectivity_weights,
+                )
+            except Exception:
+                pass
+
+        try:
+            score = _proxy_score_pos(benchmark, plc, trial)
+        except Exception:
+            continue
+
+        if score < best_score - 1e-6:
+            best_score = score
+            best_pos = trial.copy()
+
+    return best_pos
+
+
 # ── HybridPlacer class ─────────────────────────────────────────────────────
 
 class HybridPlacer(BasePlacer):
     """
-    Hybrid placer v8: multi-candidate analytical → pre-SA GPU smooth → SA →
-      GPU refine → greedy → flip → GPU polish → fine greedy → micro GPU polish.
+    Hybrid placer v10: multi-seed early pipeline (analytical + SA) with
+      full-proxy selection → greedy → swap → flip → GPU polish →
+      fine greedy → cluster → micro polish → proxy local → ultrafine →
+      hotspot evacuation → ILS kicks.
 
-    Phase 1  (analytical): 7 diverse candidates × 2500 Adam steps.
-    Phase 2  (legalize): Minimum-displacement overlap resolution.
-    Phase 3  (pre-SA GPU smooth): 100-step tight-anchor GPU pass to remove legalization
-               displacement artifacts before SA.
-    Phase 4  (SA): 300K iterations with HPWL + density co-optimization + reheating.
-    Phase 5  (flip): Greedy pin orientation flipping for HPWL reduction.
-    Phase 6  (GPU refine): Cosine-scheduled differentiable pass with congestion loss (500 steps).
-    Phase 7  (greedy refine): Connectivity-sorted evaluator-guided coordinate descent
-               (5 passes, scales 0.004–0.12).
-    Phase 8  (post-greedy flip): Second orientation flip after greedy repositioning.
-    Phase 9  (GPU polish): Short differentiable pass after greedy (200 steps, lr=0.04).
-    Phase 10 (fine greedy): 3-pass coordinate descent with fine scales (0.001–0.05).
-    Phase 11 (micro GPU polish): 100-step tight-anchor polish after fine greedy.
-    Phase 12 (soft recenter): Move soft macros to weighted pin centroids.
-
-    v8 changes vs v7 (avg 1.4828):
-      - Pre-SA GPU smoothing (100 steps, tight anchor) to remove legalization artifacts
-      - Post-first-greedy flip: second orientation flip after greedy repositioning
-      - Fine greedy: 3 passes at scales (0.001, 0.003, 0.008, 0.02, 0.05) after GPU polish
-      - Micro GPU polish: 100-step low-LR tight-anchor pass after fine greedy
+    v10 changes vs v9:
+      - Multi-seed early pipeline: the top-K analytical candidates each
+        get pushed through pre-SA smoothing, main SA, and congestion SA
+        with their own seeds; the best full-proxy pipeline output is
+        kept for the late stages.  Adds diversity at the only phases
+        where it still pays off — all v7-v10 local moves have exhausted
+        their reach.
+      - Inherits v9: congestion hotspot evacuation, ILS random kicks,
+        global-best tracking.
     """
 
     def __init__(
@@ -1445,6 +2091,11 @@ class HybridPlacer(BasePlacer):
         # Analytical phase
         analytical_steps: int = 2500,
         analytical_candidates: int = 7,
+        # Multi-seed early pipeline: how many top-ranked analytical candidates
+        # get pushed all the way through SA + congestion SA. Each runs with its
+        # own seed so the SA random move streams diverge; the best by full
+        # proxy is kept for the late stages.
+        early_candidates: int = 3,
         # Pre-SA GPU smoothing (removes legalization artifacts)
         pre_sa_smoothing_steps: int = 100,
         # SA phase
@@ -1462,6 +2113,22 @@ class HybridPlacer(BasePlacer):
         # Fine greedy (second cycle, small scales) + micro polish
         second_greedy_passes: int = 3,
         second_greedy_polish_steps: int = 100,
+        # v9: new phases
+        swap_passes: int = 2,
+        swap_neighbors: int = 8,
+        cluster_max: int = 20,
+        cluster_size: int = 5,
+        ultrafine_top_k: int = 20,
+        # v9: hotspot evacuation + ILS kicks
+        hotspot_max_candidates: int = 20,
+        hotspot_num_targets: int = 6,
+        hotspot_passes: int = 2,
+        hotspot_time_budget: float = 20.0,
+        ils_kicks: int = 3,
+        ils_kick_fraction: float = 0.15,
+        ils_gpu_steps: int = 80,
+        ils_greedy_passes: int = 1,
+        ils_time_budget: float = 30.0,
         # Soft macro FD
         run_fd: bool = False,
         # Debug
@@ -1472,6 +2139,7 @@ class HybridPlacer(BasePlacer):
         self.seed = seed
         self.analytical_steps = analytical_steps
         self.analytical_candidates = analytical_candidates
+        self.early_candidates = early_candidates
         self.pre_sa_smoothing_steps = pre_sa_smoothing_steps
         self.sa_iters = sa_iters
         self.congestion_sa_iters = congestion_sa_iters
@@ -1485,6 +2153,20 @@ class HybridPlacer(BasePlacer):
         self.greedy_passes = greedy_passes
         self.second_greedy_passes = second_greedy_passes
         self.second_greedy_polish_steps = second_greedy_polish_steps
+        self.swap_passes = swap_passes
+        self.swap_neighbors = swap_neighbors
+        self.cluster_max = cluster_max
+        self.cluster_size = cluster_size
+        self.ultrafine_top_k = ultrafine_top_k
+        self.hotspot_max_candidates = hotspot_max_candidates
+        self.hotspot_num_targets = hotspot_num_targets
+        self.hotspot_passes = hotspot_passes
+        self.hotspot_time_budget = hotspot_time_budget
+        self.ils_kicks = ils_kicks
+        self.ils_kick_fraction = ils_kick_fraction
+        self.ils_gpu_steps = ils_gpu_steps
+        self.ils_greedy_passes = ils_greedy_passes
+        self.ils_time_budget = ils_time_budget
         self.run_fd = run_fd
         self.capture_snapshots = capture_snapshots
         self.snapshot_interval = snapshot_interval
@@ -1519,7 +2201,56 @@ class HybridPlacer(BasePlacer):
         else:
             nets, macro_to_nets = [], [[] for _ in range(n_hard)]
 
-        # ── Phase 1: Multi-candidate analytical placement ─────────────────
+        def capture_snapshot(pos_hard: np.ndarray):
+            if not self.capture_snapshots:
+                return
+            frame = benchmark.macro_positions.clone()
+            frame[:n_hard] = torch.tensor(pos_hard, dtype=torch.float32)
+            self.debug_snapshots.append(frame)
+
+        def capture_trace(point: dict):
+            self.debug_trace.append(point)
+
+        # Neighbor lists are purely net-derived; needed by every SA call below.
+        neighbors = [set() for _ in range(n_hard)]
+        for net in nets:
+            idx = net["hard_idx"]
+            for a in idx:
+                for b in idx:
+                    if a != b:
+                        neighbors[a].add(int(b))
+        neighbors = [list(s) for s in neighbors]
+
+        def _compute_density_w(pos_np):
+            """SA density-weight calibration for a given starting position."""
+            gcol = grow = 0
+            dw = 0.0
+            if plc is None or not nets:
+                return dw, gcol, grow
+            try:
+                gcol, grow = plc.grid_col, plc.grid_row
+                if gcol > 0 and grow > 0:
+                    from macro_place.objective import _set_placement
+                    full_init = benchmark.macro_positions.clone()
+                    full_init[:n_hard] = torch.tensor(pos_np, dtype=torch.float32)
+                    _set_placement(plc, full_init, benchmark)
+                    wl_norm = plc.get_cost()
+                    raw_hpwl = _compute_total_hpwl(pos_np, nets)
+                    if wl_norm > 1e-10 and raw_hpwl > 1e-10:
+                        dw = 0.5 * raw_hpwl / wl_norm
+                        dw *= self.sa_density_boost
+            except Exception:
+                return 0.0, 0, 0
+            return dw, gcol, grow
+
+        # ── Phase 1+3: Multi-seed early pipeline ───────────────────────────
+        # Late-stage local moves (greedy, swap, cluster, ultrafine, hotspot,
+        # ILS) have exhausted their reach — injecting seed diversity earlier
+        # is the remaining lever.  We run the full
+        #   analytical → legalize → pre-SA smooth → SA → congestion SA
+        # pipeline for the top-K analytical candidates (ranked by legalized
+        # proxy), each with its own seed so the SA random move streams
+        # diverge, and keep the pipeline output with the lowest full proxy.
         if plc is not None:
             # Different density/halo/repulsion configs explore diverse strategies
             candidate_configs = [
@@ -1553,9 +2284,8 @@ class HybridPlacer(BasePlacer):
                      gamma_start=30.0, gamma_end=3.0),
             ][:max(1, self.analytical_candidates)]
 
-            best_init_score = float("inf")
-            pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
-
+            # Stage A: run all analytical candidates and score each (legalized).
+            analytical_ranked = []  # list of (score, legal_pos, ci)
             for ci, cfg in enumerate(candidate_configs):
                 cand_pos = _analytical_place(
                     benchmark, plc, nets,
@@ -1576,123 +2306,126 @@ class HybridPlacer(BasePlacer):
                     score = _proxy_score_pos(benchmark, plc, legal_cand)
                 except Exception:
                     score = float("inf")
-                if score < best_init_score:
-                    best_init_score = score
-                    pos = legal_cand
+                analytical_ranked.append((score, legal_cand, ci))
+
+            analytical_ranked.sort(key=lambda x: x[0])
+            n_early = max(1, min(self.early_candidates, len(analytical_ranked)))
+            top_candidates = analytical_ranked[:n_early]
+
+            # Stage B: push each top-K analytical candidate through the full
+            # early pipeline (pre-SA smooth → SA → congestion SA) with a
+            # distinct seed, then select best by full proxy.
+            best_early_pos = None
+            best_early_score = float("inf")
+
+            # Precompute constants for congestion SA
+            vroutes_per_micron = float(getattr(plc, "vroutes_per_micron", getattr(benchmark, "vroutes_per_micron", 0.0)))
+            hroutes_per_micron = float(getattr(plc, "hroutes_per_micron", getattr(benchmark, "hroutes_per_micron", 0.0)))
+            vrouting_alloc = float(getattr(plc, "vrouting_alloc", 0.0))
+            hrouting_alloc = float(getattr(plc, "hrouting_alloc", 0.0))
+            smooth_range = int(getattr(plc, "congestion_smooth_range", 0))
+
+            for rank, (_anal_score, anal_pos, ci) in enumerate(top_candidates):
+                # Seed strategy: rank 0 uses self.seed so the best analytical
+                # candidate reproduces pre-multi-seed behavior; deeper ranks
+                # use prime offsets for independent SA move streams.
+                cand_seed = self.seed + rank * 1009
+                is_first = (rank == 0)
+
+                cand_pos = anal_pos.copy()
+
+                # Pre-SA GPU smoothing (remove legalization displacement artifacts)
+                if self.pre_sa_smoothing_steps > 0:
+                    pre_smooth_pos = cand_pos.copy()
+                    smoothed = _gpu_post_refine(
+                        benchmark, plc, cand_pos,
+                        num_steps=self.pre_sa_smoothing_steps,
+                        lr=0.02,
+                        anchor_weight=0.05,
+                        seed=cand_seed,
+                    )
+                    smoothed = _legalize(smoothed, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+                    try:
+                        if _proxy_score_pos(benchmark, plc, smoothed) <= _proxy_score_pos(benchmark, plc, pre_smooth_pos):
+                            cand_pos = smoothed
+                    except Exception:
+                        pass
+
+                # Density-weight calibration depends on position, recompute per candidate.
+                cand_density_w, cand_gcol, cand_grow = _compute_density_w(cand_pos)
+
+                # Main SA — only the first (lowest-analytical-score) candidate
+                # feeds snapshot/trace callbacks, so debug output stays single-stream.
+                if nets:
+                    cand_pos = _sa_refine(
+                        cand_pos, nets, macro_to_nets, neighbors,
+                        movable, sizes, half_w, half_h, sep_x, sep_y,
+                        cw, ch, self.sa_iters, cand_seed,
+                        snapshot_interval=self.snapshot_interval if is_first else 0,
+                        snapshot_callback=capture_snapshot if (self.capture_snapshots and is_first) else None,
+                        trace_interval=self.trace_interval if is_first else 0,
+                        trace_callback=capture_trace if is_first else None,
+                        t_start_factor=self.sa_t_start,
+                        t_end_factor=self.sa_t_end,
+                        reheat_threshold=self.reheat_threshold,
+                        reheat_factor=self.reheat_factor,
+                        density_weight=cand_density_w,
+                        grid_col=cand_gcol,
+                        grid_row=cand_grow,
+                        benchmark=benchmark,
+                    )
+
+                # Short congestion-focused SA cleanup
+                if nets and self.congestion_sa_iters > 0:
+                    try:
+                        if cand_gcol > 0 and cand_grow > 0 and vroutes_per_micron > 0 and hroutes_per_micron > 0:
+                            congestion_pos = _sa_refine_congestion(
+                                cand_pos, nets, macro_to_nets, neighbors,
+                                movable, sizes, half_w, half_h, sep_x, sep_y,
+                                cw, ch, self.congestion_sa_iters, cand_seed + 17,
+                                cand_grow, cand_gcol, vroutes_per_micron, hroutes_per_micron,
+                                vrouting_alloc, hrouting_alloc, smooth_range,
+                                plc,
+                                congestion_weight=0.35,
+                                t_start_factor=max(self.sa_t_start * 0.45, 0.03),
+                                t_end_factor=max(self.sa_t_end * 0.5, 0.0005),
+                                reheat_threshold=max(2_000, self.reheat_threshold // 2),
+                                reheat_factor=max(1.5, self.reheat_factor - 0.5),
+                            )
+                            congestion_pos = _legalize(
+                                congestion_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y,
+                            )
+                            if _proxy_score_pos(benchmark, plc, congestion_pos) <= _proxy_score_pos(benchmark, plc, cand_pos):
+                                cand_pos = congestion_pos
+                    except Exception:
+                        pass
+
+                # Final legalize + full-proxy score for selection
+                cand_pos = _legalize(cand_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+                try:
+                    cand_score = _proxy_score_pos(benchmark, plc, cand_pos)
+                except Exception:
+                    cand_score = float("inf")
+
+                if cand_score < best_early_score:
+                    best_early_score = cand_score
+                    best_early_pos = cand_pos.copy()
+
+            if best_early_pos is not None:
+                pos = best_early_pos
+            else:
+                pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
+                pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+
+            # Expose grid params for any downstream consumer (mirrors pre-refactor state).
+            density_w, grid_col, grid_row = _compute_density_w(pos)
         else:
             pos = benchmark.macro_positions[:n_hard].numpy().copy().astype(np.float64)
-
-        # ── Phase 2: Legalize ──────────────────────────────────────────────
-        pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
-
-        # ── Phase 3: Pre-SA GPU smoothing ─────────────────────────────────
-        # Remove legalization displacement artifacts before SA for a cleaner start.
-        if plc is not None and self.pre_sa_smoothing_steps > 0:
-            pre_smooth_pos = pos.copy()
-            smoothed = _gpu_post_refine(
-                benchmark, plc, pos,
-                num_steps=self.pre_sa_smoothing_steps,
-                lr=0.02,
-                anchor_weight=0.05,
-                seed=self.seed,
-            )
-            smoothed = _legalize(smoothed, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
-            try:
-                if _proxy_score_pos(benchmark, plc, smoothed) <= _proxy_score_pos(benchmark, plc, pre_smooth_pos):
-                    pos = smoothed
-            except Exception:
-                pass
-
-        def capture_snapshot(pos_hard: np.ndarray):
-            if not self.capture_snapshots:
-                return
-            frame = benchmark.macro_positions.clone()
-            frame[:n_hard] = torch.tensor(pos_hard, dtype=torch.float32)
-            self.debug_snapshots.append(frame)
-
-        def capture_trace(point: dict):
-            self.debug_trace.append(point)
+            pos = _legalize(pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y)
+            density_w = 0.0
+            grid_col = grid_row = 0
 
         capture_snapshot(pos)
-
-        # ── Phase 3: SA refinement with reheating ──────────────────────────
-        neighbors = [set() for _ in range(n_hard)]
-        for net in nets:
-            idx = net["hard_idx"]
-            for a in idx:
-                for b in idx:
-                    if a != b:
-                        neighbors[a].add(int(b))
-        neighbors = [list(s) for s in neighbors]
-
-        # ── Density weight calibration (SA co-optimises HPWL + density) ───
-        grid_col = grid_row = 0
-        density_w = 0.0
-        if plc is not None and nets:
-            try:
-                grid_col, grid_row = plc.grid_col, plc.grid_row
-                if grid_col > 0 and grid_row > 0:
-                    from macro_place.objective import _set_placement
-                    full_init = benchmark.macro_positions.clone()
-                    full_init[:n_hard] = torch.tensor(pos, dtype=torch.float32)
-                    _set_placement(plc, full_init, benchmark)
-                    wl_norm = plc.get_cost()
-                    raw_hpwl = _compute_total_hpwl(pos, nets)
-                    if wl_norm > 1e-10 and raw_hpwl > 1e-10:
-                        density_w = 0.5 * raw_hpwl / wl_norm
-                        density_w *= self.sa_density_boost
-            except Exception:
-                grid_col = grid_row = 0
-                density_w = 0.0
-
-        if nets:
-            pos = _sa_refine(
-                pos, nets, macro_to_nets, neighbors,
-                movable, sizes, half_w, half_h, sep_x, sep_y,
-                cw, ch, self.sa_iters, self.seed,
-                snapshot_interval=self.snapshot_interval,
-                snapshot_callback=capture_snapshot if self.capture_snapshots else None,
-                trace_interval=self.trace_interval,
-                trace_callback=capture_trace,
-                t_start_factor=self.sa_t_start,
-                t_end_factor=self.sa_t_end,
-                reheat_threshold=self.reheat_threshold,
-                reheat_factor=self.reheat_factor,
-                density_weight=density_w,
-                grid_col=grid_col,
-                grid_row=grid_row,
-                benchmark=benchmark,
-            )
-
-        # ── Short congestion-focused SA cleanup ────────────────────────────
-        if plc is not None and nets and self.congestion_sa_iters > 0:
-            try:
-                vroutes_per_micron = float(getattr(plc, "vroutes_per_micron", getattr(benchmark, "vroutes_per_micron", 0.0)))
-                hroutes_per_micron = float(getattr(plc, "hroutes_per_micron", getattr(benchmark, "hroutes_per_micron", 0.0)))
-                vrouting_alloc = float(getattr(plc, "vrouting_alloc", 0.0))
-                hrouting_alloc = float(getattr(plc, "hrouting_alloc", 0.0))
-                smooth_range = int(getattr(plc, "congestion_smooth_range", 0))
-                if grid_col > 0 and grid_row > 0 and vroutes_per_micron > 0 and hroutes_per_micron > 0:
-                    congestion_pos = _sa_refine_congestion(
-                        pos, nets, macro_to_nets, neighbors,
-                        movable, sizes, half_w, half_h, sep_x, sep_y,
-                        cw, ch, self.congestion_sa_iters, self.seed + 17,
-                        grid_row, grid_col, vroutes_per_micron, hroutes_per_micron,
-                        vrouting_alloc, hrouting_alloc, smooth_range,
-                        plc,
-                        congestion_weight=0.35,
-                        t_start_factor=max(self.sa_t_start * 0.45, 0.03),
-                        t_end_factor=max(self.sa_t_end * 0.5, 0.0005),
-                        reheat_threshold=max(2_000, self.reheat_threshold // 2),
-                        reheat_factor=max(1.5, self.reheat_factor - 0.5),
-                    )
-                    congestion_pos = _legalize(
-                        congestion_pos, movable, sizes, half_w, half_h, cw, ch, n_hard, sep_x, sep_y,
-                    )
-                    if _proxy_score_pos(benchmark, plc, congestion_pos) <= _proxy_score_pos(benchmark, plc, pos):
-                        pos = congestion_pos
-            except Exception:
-                pass
 
         # ── Greedy pin flipping (proxy-aware when benchmark is available) ──
         if nets and plc is not None:
@@ -1727,6 +2460,28 @@ class HybridPlacer(BasePlacer):
             pos, nets, macro_to_nets, movable, half_w, half_h, cw, ch,
         ) if nets else None
 
+        # ── Global-best tracking: safety net ───────────────────────────────
+        # Each phase compares against global_best and reverts if degraded.
+        global_best_pos = pos.copy()
+        try:
+            global_best_score = _proxy_score_pos(benchmark, plc, global_best_pos) if plc is not None else float("inf")
+        except Exception:
+            global_best_score = float("inf")
+
+        def _update_global_best(candidate_pos):
+            nonlocal global_best_pos, global_best_score
+            if plc is None:
+                return candidate_pos
+            try:
+                score = _proxy_score_pos(benchmark, plc, candidate_pos)
+            except Exception:
+                return global_best_pos.copy()
+            if score < global_best_score - 1e-9:
+                global_best_score = score
+                global_best_pos = candidate_pos.copy()
+                return candidate_pos
+            return global_best_pos.copy()
+
         # ── Evaluator-guided greedy refinement ─────────────────────────────
         if plc is not None and self.greedy_passes > 0:
             pos = _greedy_refine_proxy(
@@ -1736,11 +2491,23 @@ class HybridPlacer(BasePlacer):
                 connectivity_weights=conn_weights,
                 macro_pull_targets=macro_pull_targets,
             )
+            pos = _update_global_best(pos)
+
+        # ── Pairwise swap greedy (v9): unlock moves single-macro can't reach ─
+        if plc is not None and self.swap_passes > 0 and nets:
+            pos = _swap_greedy_refine(
+                pos, benchmark, plc, movable, nets, macro_to_nets,
+                sizes, half_w, half_h, sep_x, sep_y, cw, ch,
+                max_passes=self.swap_passes,
+                max_neighbors=self.swap_neighbors,
+            )
+            pos = _update_global_best(pos)
 
         # ── Post-greedy flip (second orientation pass after greedy repositioning) ─
         # Greedy shifts may unlock different optimal orientations.
         if nets and plc is not None:
             _greedy_flip(pos, nets, macro_to_nets, movable, plc, benchmark=benchmark)
+            pos = _update_global_best(pos)
 
         # ── Post-greedy GPU polish ──────────────────────────────────────────
         # Short differentiable pass to smooth any interaction effects from greedy
@@ -1761,6 +2528,7 @@ class HybridPlacer(BasePlacer):
                     pos = polished_pos
             except Exception:
                 pass
+            pos = _update_global_best(pos)
 
         # ── Fine greedy (second cycle, small scales) ────────────────────────
         # After GPU polish, positions have shifted slightly; fine-scale greedy
@@ -1774,6 +2542,17 @@ class HybridPlacer(BasePlacer):
                 connectivity_weights=conn_weights,
                 macro_pull_targets=macro_pull_targets,
             )
+            pos = _update_global_best(pos)
+
+        # ── Cluster translation (v9): translate connected groups together ──
+        if plc is not None and self.cluster_max > 0 and nets:
+            pos = _cluster_translate_refine(
+                pos, benchmark, plc, movable, nets, macro_to_nets,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                cluster_size=self.cluster_size,
+                max_clusters=self.cluster_max,
+            )
+            pos = _update_global_best(pos)
 
         # ── Micro GPU polish (tight anchor, after fine greedy) ──────────────
         # Very short differentiable pass to smooth fine-greedy interaction effects.
@@ -1794,6 +2573,7 @@ class HybridPlacer(BasePlacer):
                     pos = micro_polished
             except Exception:
                 pass
+            pos = _update_global_best(pos)
 
         # ── Final proxy-aware macro shift cleanup ──────────────────────────
         if plc is not None:
@@ -1804,6 +2584,61 @@ class HybridPlacer(BasePlacer):
                 shift_frac=0.02,
                 time_budget=20.0,
             )
+            pos = _update_global_best(pos)
+
+        # ── Ultrafine refinement (v9): very small perturbations on hot macros ─
+        if plc is not None and self.ultrafine_top_k > 0:
+            pos = _ultrafine_refine(
+                pos, benchmark, plc, movable,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                conn_weights,
+                top_k=self.ultrafine_top_k,
+            )
+            pos = _update_global_best(pos)
+
+        # ── Congestion hotspot evacuation (v9) ────────────────────────────
+        # Reads the REAL post-smoothing H+V congestion arrays from plc
+        # (populated by the last _proxy_score_pos call), locates movable
+        # macros inside top-5% hot cells, and tries relocating them to
+        # cold cells.  Acts directly on the ABU-top-5% metric driving
+        # the score gap vs RePlAce.
+        if plc is not None and self.hotspot_max_candidates > 0 and nets:
+            # Start from the best we've seen so the hot-map reflects it
+            pos = global_best_pos.copy()
+            pos = _evacuate_hotspots(
+                pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                conn_weights, n_hard,
+                top_percentile=0.05,
+                max_candidates=self.hotspot_max_candidates,
+                num_targets=self.hotspot_num_targets,
+                max_passes=self.hotspot_passes,
+                time_budget=self.hotspot_time_budget,
+            )
+            pos = _update_global_best(pos)
+
+        # ── ILS random kicks (v9) ─────────────────────────────────────────
+        # Only phase that can escape the deep local minimum all v7-v9
+        # local moves converge to.  Kicks low-connectivity macros (minimal
+        # HPWL disruption), legalizes, short GPU refine, single greedy pass,
+        # accepts if full proxy improves.
+        if plc is not None and self.ils_kicks > 0 and nets:
+            pos = global_best_pos.copy()
+            pos = _ils_kick_refine(
+                pos, benchmark, plc, movable, sizes,
+                half_w, half_h, sep_x, sep_y, cw, ch,
+                conn_weights, n_hard,
+                num_kicks=self.ils_kicks,
+                kick_fraction=self.ils_kick_fraction,
+                gpu_refine_steps=self.ils_gpu_steps,
+                greedy_passes=self.ils_greedy_passes,
+                time_budget=self.ils_time_budget,
+            )
+            pos = _update_global_best(pos)
+
+        # Force-use global best (in case last phase was not an improvement)
+        if plc is not None:
+            pos = global_best_pos.copy()
 
         # Build full placement tensor
         full_pos = benchmark.macro_positions.clone()
