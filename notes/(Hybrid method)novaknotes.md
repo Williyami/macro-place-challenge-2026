@@ -755,3 +755,113 @@ Total runtime: **1452.63s** (~24.2 min for all 17 benchmarks)
 | 4 | HybridPlacer v7 | 1.4828 |
 | 5 | HybridPlacer v5 | 1.5723 |
 | 6 | SA (baseline) | 2.1251 |
+
+---
+
+## 2026-04-10 — H10 (v10): Multi-Seed Early Pipeline
+
+Added multi-seed early pipeline on top of the v9 hotspot evacuation + ILS kicks pipeline.
+
+**Key change**: The top-K analytical candidates (ranked by legalized proxy) each get
+pushed all the way through pre-SA GPU smoothing, main SA (300K), and congestion SA (40K),
+with their own random seeds so the SA move streams diverge. The best pipeline output by
+full proxy is kept for the late stages. This addresses the observation from v9 that every
+late-stage local move (greedy, swap, cluster, ultrafine, hotspot, ILS) has exhausted its
+reach — the remaining headroom is diversity in the starting basin, which only the
+analytical+SA stages can produce.
+
+Pipeline (v10):
+1. Analytical: 7 candidates × 2500 Adam steps, ranked by legalized proxy.
+2. Multi-seed early loop (top-K=3 analytical candidates):
+   pre-SA GPU smoothing → SA (300K) → congestion SA (40K), distinct seed per candidate;
+   best full-proxy pipeline output is kept.
+3. Greedy flip → GPU refine → Greedy refine → Pairwise swap → Greedy flip
+4. GPU polish → Fine greedy → Cluster translation → Micro GPU polish
+5. Proxy local search → Ultrafine refinement
+6. Congestion hotspot evacuation (top-5% cells → cold cells)
+7. ILS random kicks (3 kicks × 15% low-conn macros)
+8. Soft recenter
+
+### How to replicate
+
+```bash
+PLACER_METHOD=hybrid uv run evaluate submissions/placer.py --all --no-media
+```
+
+Or directly:
+
+```bash
+uv run evaluate submissions/hybrid_placer.py --all --no-media
+```
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **1529.60s** (~25.5 min for all 17 benchmarks)
+
+| Benchmark | v10 Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | v9 Proxy | Change | Overlaps |
+|-----------|-----------|-------------|---------|--------|------------|----------|--------|----------|
+| ibm01     |    1.1167 |      1.3166 |  0.9976 | +15.2% |     -11.9% |   1.1167 |   0.0% |        0 |
+| ibm02     |    1.5932 |      1.9072 |  1.8370 | +16.5% |     +13.3% |   1.5970 |  -0.2% |        0 |
+| ibm03     |    1.3877 |      1.7401 |  1.3222 | +20.3% |      -5.0% |   1.3886 |  -0.1% |        0 |
+| ibm04     |    1.3922 |      1.5037 |  1.3024 |  +7.4% |      -6.9% |   1.3922 |   0.0% |        0 |
+| ibm06     |    1.6923 |      2.5057 |  1.6187 | +32.5% |      -4.5% |   1.6923 |   0.0% |        0 |
+| ibm07     |    1.4864 |      2.0229 |  1.4633 | +26.5% |      -1.6% |   1.4864 |   0.0% |        0 |
+| ibm08     |    1.5222 |      1.9239 |  1.4285 | +20.9% |      -6.6% |   1.5222 |   0.0% |        0 |
+| ibm09     |    1.1027 |      1.3875 |  1.1194 | +20.5% |      +1.5% |   1.1027 |   0.0% |        0 |
+| ibm10     |    1.3697 |      2.1108 |  1.5009 | +35.1% |      +8.7% |   1.3697 |   0.0% |        0 |
+| ibm11     |    1.2315 |      1.7111 |  1.1774 | +28.0% |      -4.6% |   1.2315 |   0.0% |        0 |
+| ibm12     |    1.6441 |      2.8261 |  1.7261 | +41.8% |      +4.7% |   1.6441 |   0.0% |        0 |
+| ibm13     |    1.3894 |      1.9141 |  1.3355 | +27.4% |      -4.0% |   1.3894 |   0.0% |        0 |
+| ibm14     |    1.6143 |      2.2750 |  1.5436 | +29.0% |      -4.6% |   1.6145 |  -0.0% |        0 |
+| ibm15     |    1.5939 |      2.3000 |  1.5159 | +30.7% |      -5.1% |   1.5939 |   0.0% |        0 |
+| ibm16     |    1.5277 |      2.2337 |  1.4780 | +31.6% |      -3.4% |   1.5277 |   0.0% |        0 |
+| ibm17     |    1.7493 |      3.6726 |  1.6446 | +52.4% |      -6.4% |   1.7493 |   0.0% |        0 |
+| ibm18     |    1.7871 |      2.7755 |  1.7722 | +35.6% |      -0.8% |   1.7871 |   0.0% |        0 |
+| **AVG**   | **1.4824** | **2.1251** | **1.4578** | **+30.2%** | **-1.7%** | **1.4827** | **-0.02%** | **0** |
+
+### Summary
+
+- **Average proxy cost: 1.4824** — marginal improvement over v9 (1.4827), -0.02%.
+- Small gains on ibm02 (-0.2%), ibm03 (-0.1%), ibm14 (-0.0%); all other benchmarks unchanged.
+- The multi-seed early pipeline found slightly better SA basins on a few benchmarks where the
+  analytical starting points happened to differ across seeds.
+- **Runtime**: 1529.60s (up ~5% from v9's 1452.63s), cost of running 3 parallel SA pipelines.
+- Still trails RePlAce (1.4578) by 1.7% on average; beats RePlAce on 3 benchmarks (ibm02, ibm09, ibm10, ibm12).
+- Zero overlaps on all 17 benchmarks.
+
+### Leaderboard Position
+
+| Rank | Method | Avg Proxy |
+|------|--------|-----------|
+| 1 | RePlAce (baseline) | 1.4578 |
+| 2 | **HybridPlacer v10 (ours)** | **1.4824** |
+| 3 | HybridPlacer v9 | 1.4827 |
+| 4 | HybridPlacer v8 | 1.4827 |
+| 5 | HybridPlacer v7 | 1.4828 |
+| 6 | HybridPlacer v5 | 1.5723 |
+| 7 | SA (baseline) | 2.1251 |
+
+## Benchmark Results (2026-04-10, v10)
+
+All benchmarks: **VALID (zero overlaps)**
+Total runtime: **1529.60s** (~25.5 min for all 17 benchmarks)
+
+| Benchmark |  Proxy | SA Baseline | RePlAce |  vs SA | vs RePlAce | Overlaps |
+|-----------|--------|-------------|---------|--------|------------|----------|
+| ibm01     | 1.1167 |      1.3166 |  0.9976 | +15.2% |     -11.9% |        0 |
+| ibm02     | 1.5932 |      1.9072 |  1.8370 | +16.5% |     +13.3% |        0 |
+| ibm03     | 1.3877 |      1.7401 |  1.3222 | +20.3% |      -5.0% |        0 |
+| ibm04     | 1.3922 |      1.5037 |  1.3024 |  +7.4% |      -6.9% |        0 |
+| ibm06     | 1.6923 |      2.5057 |  1.6187 | +32.5% |      -4.5% |        0 |
+| ibm07     | 1.4864 |      2.0229 |  1.4633 | +26.5% |      -1.6% |        0 |
+| ibm08     | 1.5222 |      1.9239 |  1.4285 | +20.9% |      -6.6% |        0 |
+| ibm09     | 1.1027 |      1.3875 |  1.1194 | +20.5% |      +1.5% |        0 |
+| ibm10     | 1.3697 |      2.1108 |  1.5009 | +35.1% |      +8.7% |        0 |
+| ibm11     | 1.2315 |      1.7111 |  1.1774 | +28.0% |      -4.6% |        0 |
+| ibm12     | 1.6441 |      2.8261 |  1.7261 | +41.8% |      +4.7% |        0 |
+| ibm13     | 1.3894 |      1.9141 |  1.3355 | +27.4% |      -4.0% |        0 |
+| ibm14     | 1.6143 |      2.2750 |  1.5436 | +29.0% |      -4.6% |        0 |
+| ibm15     | 1.5939 |      2.3000 |  1.5159 | +30.7% |      -5.1% |        0 |
+| ibm16     | 1.5277 |      2.2337 |  1.4780 | +31.6% |      -3.4% |        0 |
+| ibm17     | 1.7493 |      3.6726 |  1.6446 | +52.4% |      -6.4% |        0 |
+| ibm18     | 1.7871 |      2.7755 |  1.7722 | +35.6% |      -0.8% |        0 |
+| **AVG**   | **1.4824** | **2.1251** | **1.4578** | **+30.2%** | **-1.7%** | **0** |

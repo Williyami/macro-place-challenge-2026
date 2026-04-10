@@ -16,19 +16,20 @@ Partcl and Hudson River Trading are excited to co-host a competition to solve th
 | 4 | "Convex Optimization" (UWaterloo Student) | 1.4556 | â€” | â€” | 0 | 16s total |  |
 | 5 | "another Waterloo kid" (Batched Nesterov GP) | 1.4568 | â€” | â€” | 0 | 118s/bench |  |
 | â€” | RePlAce (baseline) | 1.4578 | 0.9976 | 1.8370 | 0 | â€” | âœ… |
-| **6** | **HybridPlacer v9 (ours)** | **1.4827** | **1.1027** | **1.7871** | **0** | **1452.63s total** |  |
-| **7** | **Learning Placer (ours)** | **1.4828** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
-| **8** | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
-| 9 | "UTAUSTIN-CT" (PLC-Exact Congestion-Aware SA) | 1.5062 | â€” | â€” | 0 | 35s/bench |  |
-| 10 | "oracleX" (Oracle) | 1.5130 | â€” | â€” | 0 | 3min/bench |  |
-| 11 | "CA" (congestion_aware) | 1.5238 | â€” | â€” | 0 | 13s/bench |  |
-| 12 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | âœ… |
-| **13** | **HybridPlacer v5 (ours)** | **1.5723** | **1.1204** | **1.8583** | **0** | **24641.71s total** |  |
-| **14** | **SA V2 (Eklund, ours)** | **1.5738** | **1.2071** | **1.8011** | **0** | **668.95s total** |  |
-| 15 | "Cezar" (CRISP) | 1.5806 | â€” | â€” | 0 | 10min/bench |  |
-| 16 | "UT Austin" - RH (DREAMPlace) | 1.6037 | â€” | â€” | 0 | 4.5s/bench |  |
-| **17** | **Analytical Placer (ours)** | **1.7394** | **1.3438** | **2.0684** | **0** | **598.68s total** |  |
-| 18 | "UT Austin" - CT (PROXYCost) | 1.8706 | â€” | â€” | 0 | 187s/bench |  |
+| **6** | **HybridPlacer v10 (ours)** | **1.4824** | **1.1027** | **1.7871** | **0** | **1529.60s total** |  |
+| **7** | **HybridPlacer v9 (ours)** | **1.4827** | **1.1027** | **1.7871** | **0** | **1452.63s total** |  |
+| **8** | **Learning Placer (ours)** | **1.4828** | **1.1477** | **1.7984** | **0** | **16101.83s total** |  |
+| **9** | **SA Placer (ours)** | **1.4850** | **1.1079** | **1.7875** | **0** | **999.38s total** |  |
+| 10 | "UTAUSTIN-CT" (PLC-Exact Congestion-Aware SA) | 1.5062 | â€” | â€” | 0 | 35s/bench |  |
+| 11 | "oracleX" (Oracle) | 1.5130 | â€” | â€” | 0 | 3min/bench |  |
+| 12 | "CA" (congestion_aware) | 1.5238 | â€” | â€” | 0 | 13s/bench |  |
+| 13 | Will Seed (Partcl) | 1.5338 | 1.1625 | 1.7965 | 0 | 35s total | âœ… |
+| **14** | **HybridPlacer v5 (ours)** | **1.5723** | **1.1204** | **1.8583** | **0** | **24641.71s total** |  |
+| **15** | **SA V2 (Eklund, ours)** | **1.5738** | **1.2071** | **1.8011** | **0** | **668.95s total** |  |
+| 16 | "Cezar" (CRISP) | 1.5806 | â€” | â€” | 0 | 10min/bench |  |
+| 17 | "UT Austin" - RH (DREAMPlace) | 1.6037 | â€” | â€” | 0 | 4.5s/bench |  |
+| **18** | **Analytical Placer (ours)** | **1.7394** | **1.3438** | **2.0684** | **0** | **598.68s total** |  |
+| 19 | "UT Austin" - CT (PROXYCost) | 1.8706 | â€” | â€” | 0 | 187s/bench |  |
 | â€” | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | â€” | âœ… |
 | â€” | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | âœ… |
 
@@ -42,7 +43,7 @@ Benchmark-history tracking for the note sections lives in:
 
 ![Benchmark history summary](notes/benchmark%20history/benchmark_history_full_suite.png)
 
-Latest update includes HybridPlacer v9 `H9` (1.4827) from `2026-04-09`, which adds congestion-hotspot evacuation and ILS random-kick phases on top of v8 `H8`. Average proxy cost is unchanged at 4 decimal places, but the pipeline is **~21% faster** (1452.63s vs 1829.28s) due to earlier global-best short-circuiting. It still trails the RePlAce baseline by 1.7%.
+Latest update includes HybridPlacer v10 `H10` (1.4824) from `2026-04-10`, which adds a **multi-seed early pipeline** on top of v9 `H9`. The top-3 analytical candidates each get pushed through pre-SA smoothing, main SA (300K), and congestion SA (40K) with their own random seeds; the best full-proxy pipeline output is kept. This yields a tiny improvement over v9 (1.4824 vs 1.4827) driven by slightly better SA basins on ibm02, ibm03, and ibm14. Runtime grows ~5% to 1529.60s (cost of 3 parallel early pipelines). Still trails the RePlAce baseline by 1.7%.
 
 ## About Macro Placement
 
